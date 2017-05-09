@@ -215,6 +215,10 @@ class CertUtil(object):
 
     CA = None
     CALock = threading.Lock()
+    ca_vendor = 'PHPAgent'
+    ca_digest = 'sha256'
+    ca_validity_years = 10
+    ca_validity = 24 * 60 * 60 * 365 * ca_validity_years
 
     @staticmethod
     def readFile(filename):
@@ -229,33 +233,37 @@ class CertUtil(object):
             fp.write(str(content))
 
     @staticmethod
-    def createKeyPair(type=None, bits=1024):
-        if type is None:
-            type = OpenSSL.crypto.TYPE_RSA
+    def createKeyPair(bits=1024):
         pkey = OpenSSL.crypto.PKey()
-        pkey.generate_key(type, bits)
+        pkey.generate_key(OpenSSL.crypto.TYPE_RSA, bits)
         return pkey
 
     @staticmethod
     def createCertRequest(pkey, **subj):
         req = OpenSSL.crypto.X509Req()
+        req.set_version(OpenSSL.SSL.SSLv3_METHOD)
         subject = req.get_subject()
         for k,v in subj.iteritems():
             setattr(subject, k, v)
         req.set_pubkey(pkey)
-        req.sign(pkey, 'sha256')
+        req.sign(pkey, CertUtil.ca_digest)
         return req
 
     @staticmethod
-    def createCertificate(req, (issuerKey, issuerCert), serial, (notBefore, notAfter)):
+    def createCertificate(req, (issuerKey, issuerCert), serial,(notBefore, notAfter),extensions,sans=()):
         cert = OpenSSL.crypto.X509()
+        cert.set_version(OpenSSL.SSL.SSLv3_METHOD)
         cert.set_serial_number(serial)
         cert.gmtime_adj_notBefore(notBefore)
         cert.gmtime_adj_notAfter(notAfter)
         cert.set_issuer(issuerCert.get_subject())
         cert.set_subject(req.get_subject())
         cert.set_pubkey(req.get_pubkey())
-        cert.sign(issuerKey, 'sha256')
+        if extensions :
+            cert.add_extensions([OpenSSL.crypto.X509Extension('basicConstraints', False, 'CA:TRUE', subject=cert, issuer=cert)])
+        else :
+            cert.add_extensions([OpenSSL.crypto.X509Extension(b'subjectAltName', True, ', '.join('DNS: %s' % x for x in sans))])
+        cert.sign(issuerKey, CertUtil.ca_digest)
         return cert
 
     @staticmethod
@@ -270,62 +278,77 @@ class CertUtil(object):
 
     @staticmethod
     def makeCA():
-        pkey = CertUtil.createKeyPair(bits=2048)
+        pkey = CertUtil.createKeyPair(bits=4096)
         subj = {'countryName': 'CN', 'stateOrProvinceName': 'Internet',
                 'localityName': 'Cernet', 'organizationName': 'PHPAgent',
                 'organizationalUnitName': 'PHPAgent Root', 'commonName': 'PHPAgent CA'}
         req = CertUtil.createCertRequest(pkey, **subj)
-        cert = CertUtil.createCertificate(req, (pkey, req), 0, (0, 60*60*24*7305))  #20 years
+        cert = CertUtil.createCertificate(req, (pkey, req), 0,(0, 60*60*24*7305),True)  #20 years
         return (CertUtil.dumpPEM(pkey, 0), CertUtil.dumpPEM(cert, 2))
 
     @staticmethod
-    def makeCert(host, (cakey, cacrt), serial):
+    def get_cert_serial_number(host,cacrt):
+
+        saltname = '%s|%s' % (cacrt.digest('sha1'), host)
+        return int(hashlib.md5(saltname.encode('utf-8')).hexdigest(), 16)
+
+    @staticmethod
+    def makeCert(host, (cakey, cacrt),sans=()):
+        if host[0] == '.':
+            commonName = '*' + host
+            organizationName = '*' + host
+            sans = ['*'+host] + [x for x in sans if x != '*'+host]
+        else:
+            commonName = host
+            organizationName = host
+            sans = [host] + [x for x in sans if x != host]
+        serial = CertUtil.get_cert_serial_number(host,cacrt);
         pkey = CertUtil.createKeyPair()
         subj = {'countryName': 'CN', 'stateOrProvinceName': 'Internet',
-                'localityName': 'Cernet', 'organizationName': host,
-                'organizationalUnitName': 'PHPAgent Branch', 'commonName': host}
+                'localityName': 'Cernet', 'organizationName': organizationName,
+                'organizationalUnitName': 'PHPAgent Branch', 'commonName': commonName}
         req = CertUtil.createCertRequest(pkey, **subj)
-        cert = CertUtil.createCertificate(req, (cakey, cacrt), serial, (0, 60*60*24*7305))
+        cert = CertUtil.createCertificate(req, (cakey, cacrt), serial,(0, 60*60*24*7305),False,sans)
         return (CertUtil.dumpPEM(pkey, 0), CertUtil.dumpPEM(cert, 2))
 
     @staticmethod
-    def getCertificate(host):
+    def getCertificate(host, sans=(), full_name=False):
         basedir = os.path.dirname(__file__)
+        if host.count('.') >= 2 and [len(x) for x in reversed(host.split('.'))] > [2, 4] and not full_name:
+            host = '.'+host.partition('.')[-1]
+
         keyFile = os.path.join(basedir, 'certs/%s.key' % host)
         crtFile = os.path.join(basedir, 'certs/%s.crt' % host)
-
+        if os.path.exists(keyFile):
+            return (keyFile, crtFile)
         if not os.path.isfile(keyFile):
             with CertUtil.CALock:
-                logging.info('CertUtil getCertificate for %r', host)
-                for serial in (int(hashlib.md5(host).hexdigest(),16), int(time.time() * 100)):
-                    try:
-                        key, crt = CertUtil.makeCert(host, CertUtil.CA, serial)
-                        CertUtil.writeFile(keyFile, key)
-                        CertUtil.writeFile(crtFile, crt)
-                        break
-                    except:
-                        logging.exception('CertUtil.makeCert failed: host=%r, serial=%r', host, serial)
-                        sys.exit(-1)
-
+                key, crt = CertUtil.makeCert(host, CertUtil.CA)
+                CertUtil.writeFile(keyFile, key)
+                CertUtil.writeFile(crtFile, crt)
         return (keyFile, crtFile)
 
     @staticmethod
     def checkCA():
-
-        keyFile = os.path.join(os.path.dirname(__file__), 'CA.key')
-        crtFile = os.path.join(os.path.dirname(__file__), 'CA.crt')
-        if not os.path.exists(keyFile):
-            key, crt = CertUtil.makeCA()
+        #Check CA exists
+        basedir = os.path.dirname(__file__)
+        if not os.path.exists('certs') :
+            os.mkdir('certs')
+        keyFile = os.path.join(basedir, 'CA.key')
+        crtFile = os.path.join(basedir, 'CA.crt')
+        if not os.path.exists(keyFile) or not os.path.exists(crtFile) :
+            if os.path.exists(keyFile):
+                os.remove('CA.key')
+            if os.path.exists(crtFile):
+                os.remove('CA.crt')
+            key, ca = CertUtil.makeCA()
             CertUtil.writeFile(keyFile, key)
-            CertUtil.writeFile(crtFile, crt)
+            CertUtil.writeFile(crtFile, ca)
             [os.remove(os.path.join('certs', x)) for x in os.listdir('certs')]
-        #Check CA imported
-        cmd = {'win32'  : r'cd /d "%s" && certmgr.exe -add CA.crt -c -s -r localMachine Root >NUL' % os.path.dirname(__file__) }.get(sys.platform)
-        if cmd and os.system(cmd) != 0:
-            logging.warn('PHPAgent install trusted root CA certificate failed, Please run PHPAgent by administrator/root.')
         cakey = CertUtil.readFile(keyFile)
         cacrt = CertUtil.readFile(crtFile)
         CertUtil.CA = (CertUtil.loadPEM(cakey, 0), CertUtil.loadPEM(cacrt, 2))
+
 
 def urlfetch(url, payload, method, headers, fetchhost, fetchserver, dns=None, on_error=None):
     errors = []
@@ -744,11 +767,6 @@ def main():
     if not OpenSSL:
         logging.critical('OpenSSL is disabled, ABORT!')
         sys.exit(-1)
-    if ctypes and os.name == 'nt':
-        ctypes.windll.kernel32.SetConsoleTitleW(u'PHPAgent v%s' % __version__)
-        if not common.LISTEN_VISIBLE:
-            ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
-
     CertUtil.checkCA()
     common.install_opener()
     sys.stdout.write(common.info())
