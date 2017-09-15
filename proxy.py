@@ -732,25 +732,29 @@ class PHPProxyHandler(LocalProxyHandler):
         return urlfetch(url, payload, method, headers, common.PHP_FETCHHOST, common.PHP_FETCHSERVER, dns=dns, on_error=self.handle_fetch_error)
 
     def setup(self):
-        if common.PROXY_ENABLE:
-            logging.info('Local Proxy is enable, PHPProxyHandler dont resole DNS')
-        else:
+        if not common.PROXY_ENABLE:
             fetchhost = common.PHP_FETCHHOST
             logging.info('PHPProxyHandler.setup check %s is in common.HOSTS', fetchhost)
             if fetchhost not in common.HOSTS:
                 with LocalProxyHandler.SetupLock:
                     if fetchhost not in common.HOSTS:
                         try:
-                            logging.info('Resole php fetchserver address.')
                             common.HOSTS[fetchhost] = socket.gethostbyname(fetchhost)
                             logging.info('Resole php fetchserver address OK. %s', common.HOSTS[fetchhost])
                         except Exception, e:
                             logging.exception('PHPProxyHandler.setup resolve fail: %s', e)
+        else:
+            logging.info('Local Proxy is enable, PHPProxyHandler dont resole DNS')
         PHPProxyHandler.do_CONNECT = LocalProxyHandler.do_CONNECT_Thunnel
         PHPProxyHandler.do_GET     = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.do_POST    = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.do_PUT     = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.do_DELETE  = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_ET = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_HEAD = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_PATCH = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_OPTIONS = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_TRACE = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.setup      = BaseHTTPServer.BaseHTTPRequestHandler.setup
         BaseHTTPServer.BaseHTTPRequestHandler.setup(self)
 
