@@ -751,6 +751,11 @@ class PHPProxyHandler(LocalProxyHandler):
         PHPProxyHandler.do_POST    = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.do_PUT     = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.do_DELETE  = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_ET      = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_HEAD    = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_PATCH   = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_OPTIONS = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_TRACE   = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.setup      = BaseHTTPServer.BaseHTTPRequestHandler.setup
         BaseHTTPServer.BaseHTTPRequestHandler.setup(self)
 
