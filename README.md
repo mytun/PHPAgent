@@ -6,9 +6,11 @@
 
 >1、购买php空间，php空间淘宝上有很多，而且很便宜大概也就30块左右一年的费用
 
->2、上传fetch.php到你php空间上
+>2、修改proxy.ini配置信息里fetchserver参数
 
->3、修改proxy.ini配置信息里fetchserver参数
+>3、上传fetch.php到你php空间上
+
+
 
 ## 运行
 
