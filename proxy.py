@@ -11,7 +11,7 @@ import struct, random, hashlib
 import fnmatch, base64, logging, ConfigParser
 import thread, threading
 import socket, ssl, select
-import httplib, urllib2, urlparse
+import urllib2, urlparse
 import BaseHTTPServer, SocketServer
 try:
     import ctypes
@@ -96,66 +96,6 @@ class Common(object):
         return info
 
 
-def socket_create_connection((host, port), timeout=None, source_address=None):
-    logging.debug('socket_create_connection connect (%r, %r)', host, port)
-    msg = 'getaddrinfo returns an empty list'
-    host = common.HOSTS.get(host) or host
-    for res in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
-        af, socktype, proto, canonname, sa = res
-        sock = None
-        try:
-            sock = socket.socket(af, socktype, proto)
-            if isinstance(timeout, (int, float)):
-                sock.settimeout(timeout)
-            if source_address is not None:
-                sock.bind(source_address)
-            sock.connect(sa)
-            return sock
-        except socket.error, msg:
-            if sock is not None:
-                sock.close()
-    raise socket.error, msg
-socket.create_connection = socket_create_connection
-
-def socket_forward(local, remote, timeout=60, tick=2, bufsize=8192, maxping=None, maxpong=None, idlecall=None):
-    timecount = timeout
-    try:
-        while 1:
-            timecount -= tick
-            if timecount <= 0:
-                break
-            (ins, _, errors) = select.select([local, remote], [], [local, remote], tick)
-            if errors:
-                break
-            if ins:
-                for sock in ins:
-                    data = sock.recv(bufsize)
-                    if data:
-                        if sock is local:
-                            remote.sendall(data)
-                            timecount = maxping or timeout
-                        else:
-                            local.sendall(data)
-                            timecount = maxpong or timeout
-                    else:
-                        return
-            else:
-                if idlecall:
-                    try:
-                        idlecall()
-                    except Exception, e:
-                        logging.warning('socket_forward idlecall fail:%s', e)
-                    finally:
-                        idlecall = None
-    except Exception, ex:
-        logging.warning('socket_forward error=%s', ex)
-        raise
-    finally:
-        if idlecall:
-            idlecall()
-
-def httplib_HTTPConnection_putrequest(self, method, url, skip_host=0, skip_accept_encoding=1):
-    return _httplib_HTTPConnection_putrequest(self, method, url, skip_host, skip_accept_encoding)
 
 
 class CertUtil(object):
@@ -297,8 +237,6 @@ class CertUtil(object):
         cacrt = CertUtil.readFile(crtFile)
         CertUtil.CA = (CertUtil.loadPEM(cakey, 0), CertUtil.loadPEM(cacrt, 2))
 
-
-
 class SimpleMessageClass(object):
 
     def __init__(self, fp, seekable = 0):
@@ -362,6 +300,63 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     skip_headers = frozenset(['host', 'vary', 'via', 'x-forwarded-for', 'proxy-authorization', 'proxy-connection', 'upgrade', 'keep-alive'])
     SetupLock = threading.Lock()
     MessageClass = SimpleMessageClass
+
+    def socket_create_connection(self,(host, port), timeout=None, source_address=None):
+        logging.debug('socket_create_connection connect (%r, %r)', host, port)
+        msg = 'getaddrinfo returns an empty list'
+        host = common.HOSTS.get(host) or host
+        for res in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+            af, socktype, proto, canonname, sa = res
+            sock = None
+            try:
+                sock = socket.socket(af, socktype, proto)
+                if isinstance(timeout, (int, float)):
+                    sock.settimeout(timeout)
+                if source_address is not None:
+                    sock.bind(source_address)
+                sock.connect(sa)
+                return sock
+            except socket.error, msg:
+                if sock is not None:
+                    sock.close()
+        raise socket.error, msg
+
+    def socket_forward(local, remote, timeout=60, tick=2, bufsize=8192, maxping=None, maxpong=None, idlecall=None):
+        timecount = timeout
+        try:
+            while 1:
+                timecount -= tick
+                if timecount <= 0:
+                    break
+                (ins, _, errors) = select.select([local, remote], [], [local, remote], tick)
+                if errors:
+                    break
+                if ins:
+                    for sock in ins:
+                        data = sock.recv(bufsize)
+                        if data:
+                            if sock is local:
+                                remote.sendall(data)
+                                timecount = maxping or timeout
+                            else:
+                                local.sendall(data)
+                                timecount = maxpong or timeout
+                        else:
+                            return
+                else:
+                    if idlecall:
+                        try:
+                            idlecall()
+                        except Exception, e:
+                            logging.warning('socket_forward idlecall fail:%s', e)
+                        finally:
+                            idlecall = None
+        except Exception, ex:
+            logging.warning('socket_forward error=%s', ex)
+            raise
+        finally:
+            if idlecall:
+                idlecall()
 
     def rangefetch(self, m, data):
         m = map(int, m.groups())
@@ -451,11 +446,11 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             host, _, port = self.path.rpartition(':')
             idlecall = None
             if not common.PROXY_ENABLE:
-                sock = socket.create_connection((host, int(port)))
+                sock = self.socket_create_connection((host, int(port)))
                 self.log_request(200)
                 self.wfile.write('%s 200 Tunnel established\r\n\r\n' % self.protocol_version)
             else:
-                sock = socket.create_connection((common.PROXY_HOST, common.PROXY_PORT))
+                sock = self.Socket.socket_create_connection((common.PROXY_HOST, common.PROXY_PORT))
                 ip = random.choice(common.HOSTS.get(host, host)[0])
                 data = '%s %s:%s %s\r\n' % (self.command, ip, port, self.protocol_version)
                 data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if k != 'host')
@@ -463,7 +458,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     data += '%s\r\n' % common.proxy_basic_auth_header()
                 data += '\r\n'
                 sock.sendall(data)
-            socket_forward(self.connection, sock, idlecall=idlecall)
+            self.socket_forward(self.connection, sock, idlecall=idlecall)
         except:
             logging.exception('LocalProxyHandler.do_CONNECT_Direct Error')
         finally:
@@ -522,13 +517,13 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self.log_request()
             idlecall = None
             if not common.PROXY_ENABLE:
-                sock = socket.create_connection((host, port))
+                sock = self.socket_create_connection((host, port))
                 self.headers['Connection'] = 'close'
                 data = '%s %s %s\r\n'  % (self.command, urlparse.urlunparse(('', '', path, params, query, '')), self.request_version)
                 data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if not k.startswith('proxy-'))
                 data += '\r\n'
             else:
-                sock = socket.create_connection((common.PROXY_HOST, common.PROXY_PORT))
+                sock = self.socket_create_connection((common.PROXY_HOST, common.PROXY_PORT))
                 host = common.HOSTS.get(host, host)
                 url = urlparse.urlunparse((scheme, host + ('' if port == 80 else ':%d' % port), path, params, query, ''))
                 data ='%s %s %s\r\n'  % (self.command, url, self.request_version)
@@ -543,7 +538,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             if content_length > 0:
                 data += self.rfile.read(content_length)
             sock.sendall(data)
-            socket_forward(self.connection, sock, idlecall=idlecall)
+            self.socket_forward(self.connection, sock, idlecall=idlecall)
         except Exception, ex:
             logging.exception('LocalProxyHandler.do_GET Error, %s', ex)
         finally:
@@ -600,7 +595,7 @@ class PHPProxyHandler(LocalProxyHandler):
     def urlfetch(self,url, payload, method, headers, fetchhost, fetchserver, dns=None):
         errors = []
         params = {'url': url, 'method': method, 'headers': str(headers), 'payload': payload}
-        logging.debug('urlfetch params %s', params)
+        logging.info('urlfetch params %s', params)
         if common.PHP_PASSWORD:
             params['password'] = common.PHP_PASSWORD
         if common.FETCHMAX_SERVER:
@@ -610,6 +605,7 @@ class PHPProxyHandler(LocalProxyHandler):
         if dns:
             params['dns'] = dns
         params = '&'.join('%s=%s' % (k, binascii.b2a_hex(v)) for k, v in params.iteritems())
+        logging.info('urlfetch=== params %s', params)
         for i in xrange(common.FETCHMAX_LOCAL):
             try:
                 logging.debug('urlfetch %r by %r', url, fetchserver)
@@ -637,8 +633,7 @@ class PHPProxyHandler(LocalProxyHandler):
                     data['content'] = raw_data[12 + hlen:tlen]
                 else:
                     raise ValueError('Data length is short than excepted!')
-                data['headers'] = dict((k, binascii.a2b_hex(v)) for k, _, v in
-                                       (x.partition('=') for x in raw_data[12:12 + hlen].split('&')))
+                data['headers'] = dict((k, binascii.a2b_hex(v)) for k, _, v in (x.partition('=') for x in raw_data[12:12 + hlen].split('&')))
                 return (0, data)
             except Exception, e:
                 logging.info('urlfetch error=%s on_error=%s', str(e), str(self.handle_fetch_error))
@@ -688,8 +683,7 @@ class LocalProxyServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - - %(asctime)s %(message)s', datefmt='[%d/%b/%Y %H:%M:%S]')
 common = Common()
-_httplib_HTTPConnection_putrequest = httplib.HTTPConnection.putrequest
-httplib.HTTPConnection.putrequest = httplib_HTTPConnection_putrequest
+
 
 def main():
     if not OpenSSL:
