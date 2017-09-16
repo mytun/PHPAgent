@@ -95,58 +95,6 @@ class Common(object):
         info += '------------------------------------------------------\n'
         return info
 
-class MultiplexConnection(object):
-    '''multiplex tcp connection class'''
-
-    retry = 3
-    timeout = 5
-    window = 8
-    window_min = 4
-    window_max = 60
-    window_ack = 0
-
-    def __init__(self, hosts, port):
-        self.socket = None
-        self._sockets = set([])
-        self.connect(hosts, port, MultiplexConnection.timeout, MultiplexConnection.window)
-    def connect(self, hostlist, port, timeout, window):
-        for i in xrange(MultiplexConnection.retry):
-            hosts = random.sample(hostlist, window) if len(hostlist) > window else hostlist
-            logging.debug('MultiplexConnection try connect hosts=%s, port=%d', hosts, port)
-            socks = []
-            for host in hosts:
-                sock_family = socket.AF_INET6 if ':' in host else socket.AF_INET
-                sock = socket.socket(sock_family, socket.SOCK_STREAM)
-                sock.setblocking(0)
-                err = sock.connect_ex((host, port))
-                self._sockets.add(sock)
-                socks.append(sock)
-            (_, outs, _) = select.select([], socks, [], timeout)
-            if outs:
-                self.socket = outs[0]
-                self.socket.setblocking(1)
-                self._sockets.remove(self.socket)
-                if window > MultiplexConnection.window_min:
-                    MultiplexConnection.window_ack += 1
-                    if MultiplexConnection.window_ack > 10:
-                        MultiplexConnection.window = window - 1
-                        MultiplexConnection.window_ack = 0
-                        logging.info('MultiplexConnection CONNECT port=%s OK 10 times, switch new window=%d', port, MultiplexConnection.window)
-                break
-            else:
-                logging.warning('MultiplexConnection Cannot hosts %r:%r, window=%d', hosts, port, window)
-        else:
-            MultiplexConnection.window = min(int(round(window*1.5)), len(hostlist), self.window_max)
-            MultiplexConnection.window_ack = 0
-            raise RuntimeError(r'MultiplexConnection Connect hosts %s:%s fail %d times!' % (hosts, port, MultiplexConnection.retry))
-    def close(self):
-        for sock in self._sockets:
-            try:
-                sock.close()
-                del sock
-            except:
-                pass
-        del self._sockets
 
 def socket_create_connection((host, port), timeout=None, source_address=None):
     logging.debug('socket_create_connection connect (%r, %r)', host, port)
@@ -350,59 +298,6 @@ class CertUtil(object):
         CertUtil.CA = (CertUtil.loadPEM(cakey, 0), CertUtil.loadPEM(cacrt, 2))
 
 
-def urlfetch(url, payload, method, headers, fetchhost, fetchserver, dns=None, on_error=None):
-    errors = []
-    params = {'url':url, 'method':method, 'headers':str(headers), 'payload':payload}
-    logging.debug('urlfetch params %s', params)
-    if common.PHP_PASSWORD:
-        params['password'] = common.PHP_PASSWORD
-    if common.FETCHMAX_SERVER:
-        params['fetchmax'] = common.FETCHMAX_SERVER
-    if common.USERAGENT_ENABLE:
-        params['useragent'] = common.USERAGENT_STRING
-    if dns:
-        params['dns'] = dns
-    params =  '&'.join('%s=%s' % (k, binascii.b2a_hex(v)) for k, v in params.iteritems())
-    for i in xrange(common.FETCHMAX_LOCAL):
-        try:
-            logging.debug('urlfetch %r by %r', url, fetchserver)
-            request = urllib2.Request(fetchserver, zlib.compress(params, 9))
-            request.add_header('Content-Type', '')
-            if common.PROXY_ENABLE:
-                request.add_header('Host', fetchhost)
-            response = urllib2.urlopen(request)
-            data = response.read()
-            response.close()
-
-            if data[0] == '0':
-                raw_data = data[1:]
-            elif data[0] == '1':
-                raw_data = zlib.decompress(data[1:])
-            else:
-                raise ValueError('Data format not match(%s)' % url)
-            data = {}
-            data['code'], hlen, clen = struct.unpack('>3I', raw_data[:12])
-            tlen = 12+hlen+clen
-            realtlen = len(raw_data)
-            if realtlen == tlen:
-                data['content'] = raw_data[12+hlen:]
-            elif realtlen > tlen:
-                data['content'] = raw_data[12+hlen:tlen]
-            else:
-                raise ValueError('Data length is short than excepted!')
-            data['headers'] = dict((k, binascii.a2b_hex(v)) for k, _, v in (x.partition('=') for x in raw_data[12:12+hlen].split('&')))
-            return (0, data)
-        except Exception, e:
-            if on_error:
-                logging.info('urlfetch error=%s on_error=%s', str(e), str(on_error))
-                data = on_error(e)
-                if data:
-                    fetchhost = data.get('fetchhost', fetchhost)
-                    fetchserver = data.get('fetchserver', fetchserver)
-            errors.append(str(e))
-            time.sleep(i+1)
-            continue
-    return (-1, errors)
 
 class SimpleMessageClass(object):
 
@@ -545,9 +440,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def do_CONNECT(self):
         host, _, port = self.path.rpartition(':')
-        if host.endswith(common.GOOGLE_SITES) and host not in common.GOOGLE_WITHGAE:
-            return self.do_CONNECT_Direct()
-        elif host in common.HOSTS:
+        if host in common.HOSTS:
             return self.do_CONNECT_Direct()
         else:
             return self.do_CONNECT_Thunnel()
@@ -558,20 +451,12 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             host, _, port = self.path.rpartition(':')
             idlecall = None
             if not common.PROXY_ENABLE:
-                if host.endswith(common.GOOGLE_SITES):
-                    conn = MultiplexConnection(common.GOOGLE_HOSTS, int(port))
-                    sock = conn.socket
-                    idlecall=conn.close
-                else:
-                    sock = socket.create_connection((host, int(port)))
+                sock = socket.create_connection((host, int(port)))
                 self.log_request(200)
                 self.wfile.write('%s 200 Tunnel established\r\n\r\n' % self.protocol_version)
             else:
                 sock = socket.create_connection((common.PROXY_HOST, common.PROXY_PORT))
-                if host.endswith(common.GOOGLE_SITES):
-                    ip = random.choice(common.GOOGLE_HOSTS)
-                else:
-                    ip = random.choice(common.HOSTS.get(host, host)[0])
+                ip = random.choice(common.HOSTS.get(host, host)[0])
                 data = '%s %s:%s %s\r\n' % (self.command, ip, port, self.protocol_version)
                 data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if k != 'host')
                 if common.PROXY_USERNAME and not common.PROXY_NTLM:
@@ -620,14 +505,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def do_METHOD(self):
         host = self.headers['host']
-        if host.endswith(common.GOOGLE_SITES) and host not in common.GOOGLE_WITHGAE:
-            if host in common.GOOGLE_FORCEHTTPS:
-                self.send_response(301)
-                self.send_header('Location', self.path.replace('http://', 'https://'))
-                self.end_headers()
-                return
-            return self.do_METHOD_Direct()
-        elif host in common.HOSTS:
+        if host in common.HOSTS:
             return self.do_METHOD_Direct()
         else:
             return self.do_METHOD_Thunnel()
@@ -644,22 +522,14 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self.log_request()
             idlecall = None
             if not common.PROXY_ENABLE:
-                if host.endswith(common.GOOGLE_SITES):
-                    conn = MultiplexConnection(common.GOOGLE_HOSTS, port)
-                    sock = conn.socket
-                    idlecall = conn.close
-                else:
-                    sock = socket.create_connection((host, port))
+                sock = socket.create_connection((host, port))
                 self.headers['Connection'] = 'close'
                 data = '%s %s %s\r\n'  % (self.command, urlparse.urlunparse(('', '', path, params, query, '')), self.request_version)
                 data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if not k.startswith('proxy-'))
                 data += '\r\n'
             else:
                 sock = socket.create_connection((common.PROXY_HOST, common.PROXY_PORT))
-                if host.endswith(common.GOOGLE_SITES):
-                    host = random.choice(common.GOOGLE_HOSTS)
-                else:
-                    host = common.HOSTS.get(host, host)
+                host = common.HOSTS.get(host, host)
                 url = urlparse.urlunparse((scheme, host + ('' if port == 80 else ':%d' % port), path, params, query, ''))
                 data ='%s %s %s\r\n'  % (self.command, url, self.request_version)
                 data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if k != 'host')
@@ -727,9 +597,63 @@ class PHPProxyHandler(LocalProxyHandler):
     def handle_fetch_error(self, error):
         logging.error('PHPProxyHandler handle_fetch_error %s', error)
 
+    def urlfetch(self,url, payload, method, headers, fetchhost, fetchserver, dns=None):
+        errors = []
+        params = {'url': url, 'method': method, 'headers': str(headers), 'payload': payload}
+        logging.debug('urlfetch params %s', params)
+        if common.PHP_PASSWORD:
+            params['password'] = common.PHP_PASSWORD
+        if common.FETCHMAX_SERVER:
+            params['fetchmax'] = common.FETCHMAX_SERVER
+        if common.USERAGENT_ENABLE:
+            params['useragent'] = common.USERAGENT_STRING
+        if dns:
+            params['dns'] = dns
+        params = '&'.join('%s=%s' % (k, binascii.b2a_hex(v)) for k, v in params.iteritems())
+        for i in xrange(common.FETCHMAX_LOCAL):
+            try:
+                logging.debug('urlfetch %r by %r', url, fetchserver)
+                request = urllib2.Request(fetchserver, zlib.compress(params, 9))
+                request.add_header('Content-Type', '')
+                if common.PROXY_ENABLE:
+                    request.add_header('Host', fetchhost)
+                response = urllib2.urlopen(request)
+                data = response.read()
+                response.close()
+
+                if data[0] == '0':
+                    raw_data = data[1:]
+                elif data[0] == '1':
+                    raw_data = zlib.decompress(data[1:])
+                else:
+                    raise ValueError('Data format not match(%s)' % url)
+                data = {}
+                data['code'], hlen, clen = struct.unpack('>3I', raw_data[:12])
+                tlen = 12 + hlen + clen
+                realtlen = len(raw_data)
+                if realtlen == tlen:
+                    data['content'] = raw_data[12 + hlen:]
+                elif realtlen > tlen:
+                    data['content'] = raw_data[12 + hlen:tlen]
+                else:
+                    raise ValueError('Data length is short than excepted!')
+                data['headers'] = dict((k, binascii.a2b_hex(v)) for k, _, v in
+                                       (x.partition('=') for x in raw_data[12:12 + hlen].split('&')))
+                return (0, data)
+            except Exception, e:
+                logging.info('urlfetch error=%s on_error=%s', str(e), str(self.handle_fetch_error))
+                data = self.handle_fetch_error(e)
+                if data:
+                    fetchhost = data.get('fetchhost', fetchhost)
+                    fetchserver = data.get('fetchserver', fetchserver)
+                errors.append(str(e))
+                time.sleep(i + 1)
+                continue
+        return (-1, errors)
+
     def fetch(self, url, payload, method, headers):
         dns = common.HOSTS.get(self.headers.get('host'))
-        return urlfetch(url, payload, method, headers, common.PHP_FETCHHOST, common.PHP_FETCHSERVER, dns=dns, on_error=self.handle_fetch_error)
+        return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOST, common.PHP_FETCHSERVER, dns)
 
     def setup(self):
         if not common.PROXY_ENABLE:
