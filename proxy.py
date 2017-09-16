@@ -13,6 +13,7 @@ import thread, threading
 import socket, ssl, select
 import urllib2, urlparse
 import BaseHTTPServer, SocketServer
+
 try:
     import ctypes
 except ImportError:
@@ -592,7 +593,7 @@ class PHPProxyHandler(LocalProxyHandler):
     def handle_fetch_error(self, error):
         logging.error('PHPProxyHandler handle_fetch_error %s', error)
 
-    def urlfetch(self,url, payload, method, headers, fetchhost, fetchserver, dns=None):
+    def urlfetch(self,url, payload, method , headers, fetchhost, fetchserver, dns=None):
         errors = []
         params = {'url': url, 'method': method, 'headers': str(headers), 'payload': payload}
         logging.info('urlfetch params %s', params)
@@ -646,8 +647,9 @@ class PHPProxyHandler(LocalProxyHandler):
                 continue
         return (-1, errors)
 
-    def fetch(self, url, payload, method, headers):
+    def fetch(self, url, payload, method  = 'GET' , headers = ''):
         dns = common.HOSTS.get(self.headers.get('host'))
+        logging.info('urlfetch method=%s',method)
         return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOST, common.PHP_FETCHSERVER, dns)
 
     def setup(self):
