@@ -451,7 +451,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 self.log_request(200)
                 self.wfile.write('%s 200 Tunnel established\r\n\r\n' % self.protocol_version)
             else:
-                sock = self.Socket.socket_create_connection((common.PROXY_HOST, common.PROXY_PORT))
+                sock = self.socket_create_connection((common.PROXY_HOST, common.PROXY_PORT))
                 ip = random.choice(common.HOSTS.get(host, host)[0])
                 data = '%s %s:%s %s\r\n' % (self.command, ip, port, self.protocol_version)
                 data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if k != 'host')
@@ -647,9 +647,11 @@ class PHPProxyHandler(LocalProxyHandler):
                 continue
         return (-1, errors)
 
-    def fetch(self, url, payload, method  = 'GET' , headers = ''):
+    def fetch(self, url, payload, method , headers = ''):
         dns = common.HOSTS.get(self.headers.get('host'))
         logging.info('urlfetch method=%s',method)
+        if method == None :
+            method='GET'
         return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOST, common.PHP_FETCHSERVER, dns)
 
     def setup(self):
@@ -683,7 +685,7 @@ class LocalProxyServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s - - %(asctime)s %(message)s', datefmt='[%d/%b/%Y %H:%M:%S]')
+logging.basicConfig(level=logging.ERROR, format='%(levelname)s - - %(asctime)s %(message)s', datefmt='[%d/%b/%Y %H:%M:%S]')
 common = Common()
 
 
