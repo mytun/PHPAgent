@@ -7,7 +7,7 @@ $__password__ = '123456';
 function encode_data($dic) {
     $a = array();
     foreach ($dic as $key => $value) {
-       $a[] = $key. '=' . bin2hex($value);
+        $a[] = $key. '=' . bin2hex($value);
     }
     return join('&', $a);
 }
@@ -132,7 +132,11 @@ class URLFetch {
                 $curl_opt[CURLOPT_POSTFIELDS] = $payload;
                 break;
             case 'PUT':
-            case 'DELETE':
+            case 'ET':
+            case 'PATCH':
+            case 'OPTIONS':
+            case 'HEAD':
+            case 'TRACE':
                 $curl_opt[CURLOPT_CUSTOMREQUEST] = $method;
                 $curl_opt[CURLOPT_POSTFIELDS] = $payload;
                 break;
@@ -249,7 +253,7 @@ class URLFetch {
                         $this->headers['set-cookie'] .= "\r\nset-cookie: " . $value;
                     }
                 } else {
-                 $this->headers[$key] = $kv[1];
+                    $this->headers[$key] = $kv[1];
                 }
             }
         }
@@ -300,7 +304,7 @@ function post()
     $method  = $request['method'];
     $url     = $request['url'];
     $payload = $request['payload'];
-    $dns     = $request['dns'];
+
 
     if ($__password__ && $__password__ != $request['password']) {
         return print_notify($method, $url, 403, 'Wrong password.');
@@ -338,15 +342,6 @@ function post()
         }
     }
 
-    if ($dns) {
-        preg_match('@://(.+?)[:/]@', $url, $matches, PREG_OFFSET_CAPTURE);
-        if ($matches[1][0]) {
-            $headers['host'] = $matches[1][0];
-            $url = preg_replace('@://.+?([:/])@', "://$dns\\1", $url);
-        }
-        //error_exit('matches', $matches);
-    }
-
     //error_exit('url', $url, 'headers:', $headers);
 
     $errors = array();
@@ -354,7 +349,7 @@ function post()
         $response = urlfetch($url, $payload, $method, $headers, False, $deadline, False);
         $status_code = $response['status_code'];
         if (200 <= $status_code && $status_code < 400) {
-           return print_response($status_code, $response['headers'], $response['content']);
+            return print_response($status_code, $response['headers'], $response['content']);
         } else {
             if ($response['error']) {
                 $errors[] = $response['error'];
@@ -374,12 +369,12 @@ function get() {
         print_notify('GET', $_SERVER['SCRIPT_FILENAME'], 200, 'Error: need zlib moudle!');
         exit(-1);
     }
-    
+
     if (!function_exists('curl_version') && !ini_get('allow_url_fopen')) {
         print_notify('GET', $_SERVER['SCRIPT_FILENAME'], 200, 'Error: need curl moudle or allow_url_fopen!');
         exit(-1);
     }
-    
+
     echo <<<EOF
 
 <html>

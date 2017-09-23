@@ -8,8 +8,8 @@ __author__ = "{phus.lu,hewigovens}@gmail.com (Phus Lu and Hewig Xu)"
 
 import sys, os, re, time, errno, binascii, zlib
 import struct, random, hashlib
-import fnmatch, base64, logging, ConfigParser
-import thread, threading
+import fnmatch, logging, ConfigParser
+import threading
 import socket, ssl, select
 import urllib2, urlparse
 import BaseHTTPServer, SocketServer
@@ -43,13 +43,6 @@ class Common(object):
         self.PHP_PORT             = self.CONFIG.getint('php', 'port')
         self.PHP_FETCHSERVER      = self.CONFIG.get('php', 'fetchserver')
 
-        self.PROXY_ENABLE         = self.CONFIG.getint('proxy', 'enable')
-        self.PROXY_HOST           = self.CONFIG.get('proxy', 'host')
-        self.PROXY_PORT           = self.CONFIG.getint('proxy', 'port')
-        self.PROXY_USERNAME       = self.CONFIG.get('proxy', 'username')
-        self.PROXY_PASSWROD       = self.CONFIG.get('proxy', 'password')
-        self.PROXY_NTLM           = bool(self.CONFIG.getint('proxy', 'ntlm')) if self.CONFIG.has_option('proxy', 'ntlm') else '\\' in self.PROXY_USERNAME
-
         self.FETCHMAX_LOCAL       = self.CONFIG.getint('fetchmax', 'local') if self.CONFIG.get('fetchmax', 'local') else 3
         self.FETCHMAX_SERVER      = self.CONFIG.get('fetchmax', 'server')
 
@@ -60,28 +53,13 @@ class Common(object):
 
         self.USERAGENT_ENABLE     = self.CONFIG.getint('useragent', 'enable')
         self.USERAGENT_STRING     = self.CONFIG.get('useragent', 'string')
+        self.PHP_FETCHSERVERS     = self.PHP_FETCHSERVER.split(",")
+        self.PHP_FETCHHOSTS       = []
 
-        self.HOSTS                = dict((k, v) for k, v in self.CONFIG.items('hosts') if not k.startswith('_'))
-
-        self.PHP_FETCHHOST        = re.sub(':\d+$', '', urlparse.urlparse(self.PHP_FETCHSERVER).netloc)
-
-    def proxy_basic_auth_header(self):
-        return 'Proxy-Authorization: Basic %s' + base64.b64encode('%s:%s'%(self.PROXY_USERNAME, self.PROXY_PASSWROD))
+        for i in self.PHP_FETCHSERVERS : self.PHP_FETCHHOSTS.append(re.sub(':\d+$', '', urlparse.urlparse(i).netloc))
 
     def install_opener(self):
-        if self.PROXY_ENABLE:
-            proxy = '%s:%s@%s:%d'%(self.PROXY_USERNAME, self.PROXY_PASSWROD, self.PROXY_HOST, self.PROXY_PORT)
-            handlers = [urllib2.ProxyHandler({'http':proxy,'https':proxy})]
-            if self.PROXY_NTLM:
-                if ntlm is None:
-                    logging.critical('You need install python-ntlm to support windows domain proxy! "%s:%s"', self.PROXY_HOST, self.PROXY_PORT)
-                    sys.exit(-1)
-                passman = urllib2.HTTPPasswordMgrWithDefaultRealm()
-                passman.add_password(None, '%s:%s' % (self.PROXY_HOST, self.PROXY_PORT), self.PROXY_USERNAME, self.PROXY_PASSWROD)
-                auth_NTLM = ntlm.HTTPNtlmAuthHandler.HTTPNtlmAuthHandler(passman)
-                handlers.append(auth_NTLM)
-        else:
-            handlers = [urllib2.ProxyHandler({})]
+        handlers = [urllib2.ProxyHandler({})]
         opener = urllib2.build_opener(*handlers)
         opener.addheaders = []
         urllib2.install_opener(opener)
@@ -90,7 +68,6 @@ class Common(object):
         info = ''
         info += '------------------------------------------------------\n'
         info += 'PHPAgent Version : %s (python/%s pyopenssl/%s)\n' % (__version__, sys.version.partition(' ')[0], (OpenSSL.version.__version__ if OpenSSL else 'Disabled'))
-        info += 'Local Proxy     : %s:%s\n' % (self.PROXY_HOST, self.PROXY_PORT) if self.PROXY_ENABLE else ''
         info += 'PHP Mode Listen : %s:%d\n' % (self.PHP_IP, self.PHP_PORT) if self.PHP_ENABLE else ''
         info += 'PHP FetchServer : %s\n' % self.PHP_FETCHSERVER if self.PHP_ENABLE else ''
         info += '------------------------------------------------------\n'
@@ -305,7 +282,6 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     def socket_create_connection(self,(host, port), timeout=None, source_address=None):
         logging.debug('socket_create_connection connect (%r, %r)', host, port)
         msg = 'getaddrinfo returns an empty list'
-        host = common.HOSTS.get(host) or host
         for res in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
             af, socktype, proto, canonname, sa = res
             sock = None
@@ -349,11 +325,11 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                         try:
                             idlecall()
                         except Exception, e:
-                            logging.warning('socket_forward idlecall fail:%s', e)
+                            logging.exception('socket_forward idlecall fail:%s', e)
                         finally:
                             idlecall = None
         except Exception, ex:
-            logging.warning('socket_forward error=%s', ex)
+            logging.exception('socket_forward error=%s', ex)
             raise
         finally:
             if idlecall:
@@ -435,46 +411,14 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self.wfile.write(data)
 
     def do_CONNECT(self):
-        host, _, port = self.path.rpartition(':')
-        if host in common.HOSTS:
-            return self.do_CONNECT_Direct()
-        else:
-            return self.do_CONNECT_Thunnel()
-
-    def do_CONNECT_Direct(self):
-        try:
-            logging.debug('LocalProxyHandler.do_CONNECT_Directt %s' % self.path)
-            host, _, port = self.path.rpartition(':')
-            idlecall = None
-            if not common.PROXY_ENABLE:
-                sock = self.socket_create_connection((host, int(port)))
-                self.log_request(200)
-                self.wfile.write('%s 200 Tunnel established\r\n\r\n' % self.protocol_version)
-            else:
-                sock = self.socket_create_connection((common.PROXY_HOST, common.PROXY_PORT))
-                ip = random.choice(common.HOSTS.get(host, host)[0])
-                data = '%s %s:%s %s\r\n' % (self.command, ip, port, self.protocol_version)
-                data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if k != 'host')
-                if common.PROXY_USERNAME and not common.PROXY_NTLM:
-                    data += '%s\r\n' % common.proxy_basic_auth_header()
-                data += '\r\n'
-                sock.sendall(data)
-            self.socket_forward(self.connection, sock, idlecall=idlecall)
-        except:
-            logging.exception('LocalProxyHandler.do_CONNECT_Direct Error')
-        finally:
-            try:
-                sock.close()
-                del sock
-            except:
-                pass
+        return self.do_CONNECT_Thunnel()
 
     def do_CONNECT_Thunnel(self):
         # for ssl proxy
         host, _, port = self.path.rpartition(':')
         keyFile, crtFile = CertUtil.getCertificate(host)
         self.log_request(200)
-        self.connection.sendall('%s 200 OK\r\n\r\n' % self.protocol_version)
+        self.connection.sendall('%s 200 OK\r\n\r\n' % self.request_version)
         try:
             self._realpath = self.path
             self._realrfile = self.rfile
@@ -489,22 +433,25 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self.parse_request()
             if self.path[0] == '/':
                 self.path = 'https://%s%s' % (self._realpath, self.path)
-                self.requestline = '%s %s %s' % (self.command, self.path, self.protocol_version)
+                self.requestline = '%s %s %s' % (self.command, self.path, self.request_version)
             self.do_METHOD_Thunnel()
         except socket.error, e:
             logging.exception('do_CONNECT_Thunnel socket.error: %s', e)
         finally:
-            self.connection.shutdown(socket.SHUT_WR)
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except socket.error :
+                try:
+                    self.connection.close();
+                    del self.connection
+                except:
+                    pass
             self.rfile = self._realrfile
             self.wfile = self._realwfile
             self.connection = self._realconnection
 
     def do_METHOD(self):
-        host = self.headers['host']
-        if host in common.HOSTS:
-            return self.do_METHOD_Direct()
-        else:
-            return self.do_METHOD_Thunnel()
+        return self.do_METHOD_Thunnel()
 
     def do_METHOD_Direct(self):
         scheme, netloc, path, params, query, fragment = urlparse.urlparse(self.path, 'http')
@@ -517,24 +464,11 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         try:
             self.log_request()
             idlecall = None
-            if not common.PROXY_ENABLE:
-                sock = self.socket_create_connection((host, port))
-                self.headers['Connection'] = 'close'
-                data = '%s %s %s\r\n'  % (self.command, urlparse.urlunparse(('', '', path, params, query, '')), self.request_version)
-                data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if not k.startswith('proxy-'))
-                data += '\r\n'
-            else:
-                sock = self.socket_create_connection((common.PROXY_HOST, common.PROXY_PORT))
-                host = common.HOSTS.get(host, host)
-                url = urlparse.urlunparse((scheme, host + ('' if port == 80 else ':%d' % port), path, params, query, ''))
-                data ='%s %s %s\r\n'  % (self.command, url, self.request_version)
-                data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if k != 'host')
-                data += 'Host: %s\r\n' % netloc
-                if common.PROXY_USERNAME and not common.PROXY_NTLM:
-                    data += '%s\r\n' % common.proxy_basic_auth_header()
-                data += 'Proxy-Connection: close\r\n'
-                data += '\r\n'
-
+            sock = self.socket_create_connection((host, port))
+            self.headers['Connection'] = 'close'
+            data = '%s %s %s\r\n'  % (self.command, urlparse.urlunparse(('', '', path, params, query, '')), self.request_version)
+            data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if not k.startswith('proxy-'))
+            data += '\r\n'
             content_length = int(self.headers.get('content-length', 0))
             if content_length > 0:
                 data += self.rfile.read(content_length)
@@ -590,10 +524,11 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
 class PHPProxyHandler(LocalProxyHandler):
 
+
     def handle_fetch_error(self, error):
         logging.error('PHPProxyHandler handle_fetch_error %s', error)
 
-    def urlfetch(self,url, payload, method , headers, fetchhost, fetchserver, dns=None):
+    def urlfetch(self,url, payload, method , headers, fetchhost, fetchserver):
         errors = []
         params = {'url': url, 'method': method, 'headers': str(headers), 'payload': payload}
         logging.info('urlfetch params %s', params)
@@ -603,8 +538,6 @@ class PHPProxyHandler(LocalProxyHandler):
             params['fetchmax'] = common.FETCHMAX_SERVER
         if common.USERAGENT_ENABLE:
             params['useragent'] = common.USERAGENT_STRING
-        if dns:
-            params['dns'] = dns
         params = '&'.join('%s=%s' % (k, binascii.b2a_hex(v)) for k, v in params.iteritems())
         logging.info('urlfetch=== params %s', params)
         for i in xrange(common.FETCHMAX_LOCAL):
@@ -612,8 +545,6 @@ class PHPProxyHandler(LocalProxyHandler):
                 logging.debug('urlfetch %r by %r', url, fetchserver)
                 request = urllib2.Request(fetchserver, zlib.compress(params, 9))
                 request.add_header('Content-Type', '')
-                if common.PROXY_ENABLE:
-                    request.add_header('Host', fetchhost)
                 response = urllib2.urlopen(request)
                 data = response.read()
                 response.close()
@@ -648,36 +579,24 @@ class PHPProxyHandler(LocalProxyHandler):
         return (-1, errors)
 
     def fetch(self, url, payload, method , headers = ''):
-        dns = common.HOSTS.get(self.headers.get('host'))
+        phpLength = len(common.PHP_FETCHSERVERS);
+        phpServer = random.randint(0,len(common.PHP_FETCHSERVERS)*100)%phpLength;
         logging.info('urlfetch method=%s',method)
         if method == None :
             method='GET'
-        return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOST, common.PHP_FETCHSERVER, dns)
+        return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOSTS[phpServer], common.PHP_FETCHSERVERS[phpServer])
 
     def setup(self):
-        if not common.PROXY_ENABLE:
-            fetchhost = common.PHP_FETCHHOST
-            logging.info('PHPProxyHandler.setup check %s is in common.HOSTS', fetchhost)
-            if fetchhost not in common.HOSTS:
-                with LocalProxyHandler.SetupLock:
-                    if fetchhost not in common.HOSTS:
-                        try:
-                            common.HOSTS[fetchhost] = socket.gethostbyname(fetchhost)
-                            logging.info('Resole php fetchserver address OK. %s', common.HOSTS[fetchhost])
-                        except Exception, e:
-                            logging.exception('PHPProxyHandler.setup resolve fail: %s', e)
-        else:
-            logging.info('Local Proxy is enable, PHPProxyHandler dont resole DNS')
         PHPProxyHandler.do_CONNECT = LocalProxyHandler.do_CONNECT_Thunnel
         PHPProxyHandler.do_GET     = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.do_POST    = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.do_PUT     = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.do_DELETE  = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_ET = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_HEAD = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_PATCH = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_ET      = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_HEAD    = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_PATCH   = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.do_OPTIONS = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_TRACE = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_TRACE   = LocalProxyHandler.do_METHOD_Thunnel
         PHPProxyHandler.setup      = BaseHTTPServer.BaseHTTPRequestHandler.setup
         BaseHTTPServer.BaseHTTPRequestHandler.setup(self)
 
@@ -688,7 +607,6 @@ class LocalProxyServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
 logging.basicConfig(level=logging.ERROR, format='%(levelname)s - - %(asctime)s %(message)s', datefmt='[%d/%b/%Y %H:%M:%S]')
 common = Common()
 
-
 def main():
     if not OpenSSL:
         logging.critical('OpenSSL is disabled, ABORT!')
@@ -697,7 +615,6 @@ def main():
     common.install_opener()
     sys.stdout.write(common.info())
     httpd = LocalProxyServer((common.PHP_IP, common.PHP_PORT), PHPProxyHandler)
-    thread.start_new_thread(httpd.serve_forever, ())
     httpd.serve_forever()
 
 if __name__ == '__main__':
