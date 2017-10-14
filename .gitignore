@@ -3,3 +3,7 @@
 PHPAgent_now.iml
 PHPAgent.iml
 
+CA.crt
+CA.key
+certs/
+phpagent-osx.command

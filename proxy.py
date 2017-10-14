@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# Based on GAppProxy 2.0.0 by Du XiaoGang <dugang@188.com>
-# Based on WallProxy 0.4.0 by hexieshe <www.ehust@gmail.com>
 
-__version__ = '1.6.9'
-__author__ = "{phus.lu,hewigovens}@gmail.com (Phus Lu and Hewig Xu)"
+
+__version__ = '1.2'
+__author__ = "lxyg06@163.com"
 
 import sys, os, re, time, errno, binascii, zlib
 import struct, random, hashlib
@@ -42,6 +41,7 @@ class Common(object):
         self.PHP_PASSWORD         = self.CONFIG.get('php', 'password').strip()
         self.PHP_PORT             = self.CONFIG.getint('php', 'port')
         self.PHP_FETCHSERVER      = self.CONFIG.get('php', 'fetchserver')
+        self.PHP_FETCHSERVER_POST = self.CONFIG.get('php', 'fetchserverpost')
 
         self.FETCHMAX_LOCAL       = self.CONFIG.getint('fetchmax', 'local') if self.CONFIG.get('fetchmax', 'local') else 3
         self.FETCHMAX_SERVER      = self.CONFIG.get('fetchmax', 'server')
@@ -53,11 +53,12 @@ class Common(object):
 
         self.USERAGENT_ENABLE     = self.CONFIG.getint('useragent', 'enable')
         self.USERAGENT_STRING     = self.CONFIG.get('useragent', 'string')
+
         self.PHP_FETCHSERVERS     = self.PHP_FETCHSERVER.split(",")
         self.PHP_FETCHHOSTS       = []
 
         for i in self.PHP_FETCHSERVERS : self.PHP_FETCHHOSTS.append(re.sub(':\d+$', '', urlparse.urlparse(i).netloc))
-
+        self.PHP_FETCHHOSTS_POST  = re.sub(':\d+$', '', urlparse.urlparse(self.PHP_FETCHSERVER_POST).netloc)
     def install_opener(self):
         handlers = [urllib2.ProxyHandler({})]
         opener = urllib2.build_opener(*handlers)
@@ -69,7 +70,8 @@ class Common(object):
         info += '------------------------------------------------------\n'
         info += 'PHPAgent Version : %s (python/%s pyopenssl/%s)\n' % (__version__, sys.version.partition(' ')[0], (OpenSSL.version.__version__ if OpenSSL else 'Disabled'))
         info += 'PHP Mode Listen : %s:%d\n' % (self.PHP_IP, self.PHP_PORT) if self.PHP_ENABLE else ''
-        info += 'PHP FetchServer : %s\n' % self.PHP_FETCHSERVER if self.PHP_ENABLE else ''
+        info += 'PHP FetchServer : %s\n' % common.PHP_FETCHSERVER_POST if self.PHP_ENABLE else ''
+        info += 'PHP FetchServer GET  : %s\n' % common.PHP_FETCHSERVERS if self.PHP_ENABLE else ''
         info += '------------------------------------------------------\n'
         return info
 
@@ -462,13 +464,12 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             host = netloc
             port = 80
         try:
-            self.log_request()
+            self.log_request(200)
             idlecall = None
             sock = self.socket_create_connection((host, port))
             self.headers['Connection'] = 'close'
             data = '%s %s %s\r\n'  % (self.command, urlparse.urlunparse(('', '', path, params, query, '')), self.request_version)
             data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if not k.startswith('proxy-'))
-            data += '\r\n'
             content_length = int(self.headers.get('content-length', 0))
             if content_length > 0:
                 data += self.rfile.read(content_length)
@@ -524,13 +525,11 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
 class PHPProxyHandler(LocalProxyHandler):
 
-
-    def handle_fetch_error(self, error):
-        logging.error('PHPProxyHandler handle_fetch_error %s', error)
+    comm = 0
 
     def urlfetch(self,url, payload, method , headers, fetchhost, fetchserver):
         errors = []
-        params = {'url': url, 'method': method, 'headers': str(headers), 'payload': payload}
+        params = {'url': url, 'method': method, 'headers': headers, 'payload': payload}
         logging.info('urlfetch params %s', params)
         if common.PHP_PASSWORD:
             params['password'] = common.PHP_PASSWORD
@@ -544,11 +543,10 @@ class PHPProxyHandler(LocalProxyHandler):
             try:
                 logging.debug('urlfetch %r by %r', url, fetchserver)
                 request = urllib2.Request(fetchserver, zlib.compress(params, 9))
-                request.add_header('Content-Type', '')
                 response = urllib2.urlopen(request)
                 data = response.read()
                 response.close()
-
+                logging.info('urlfetch=== data %s', data[0])
                 if data[0] == '0':
                     raw_data = data[1:]
                 elif data[0] == '1':
@@ -568,23 +566,30 @@ class PHPProxyHandler(LocalProxyHandler):
                 data['headers'] = dict((k, binascii.a2b_hex(v)) for k, _, v in (x.partition('=') for x in raw_data[12:12 + hlen].split('&')))
                 return (0, data)
             except Exception, e:
-                logging.info('urlfetch error=%s on_error=%s', str(e), str(self.handle_fetch_error))
-                data = self.handle_fetch_error(e)
-                if data:
-                    fetchhost = data.get('fetchhost', fetchhost)
-                    fetchserver = data.get('fetchserver', fetchserver)
+                logging.error('urlfetch error=%s', str(e))
                 errors.append(str(e))
                 time.sleep(i + 1)
                 continue
         return (-1, errors)
 
     def fetch(self, url, payload, method , headers = ''):
-        phpLength = len(common.PHP_FETCHSERVERS);
-        phpServer = random.randint(0,len(common.PHP_FETCHSERVERS)*100)%phpLength;
-        logging.info('urlfetch method=%s',method)
+        logging.info('urlfetch headers=%s',str(headers))
+        if len(headers) > 2:
+            try:
+                logging.info('urlfetch===== headers=%s',str(headers[-2:]))
+                if str(headers[-2:]) == "\r\n" :
+                    headers = str(headers[:-2])
+            except:
+                headers = str(headers)
+
         if method == None :
             method='GET'
-        return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOSTS[phpServer], common.PHP_FETCHSERVERS[phpServer])
+        if method == 'GET' :
+            PHPProxyHandler.comm = (PHPProxyHandler.comm + 1) % phpLength;
+            logging.info('urlfetch method=%s',method)
+            return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOSTS[PHPProxyHandler.comm], common.PHP_FETCHSERVERS[PHPProxyHandler.comm])
+        else :
+            return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOSTS_POST, common.PHP_FETCHSERVER_POST)
 
     def setup(self):
         PHPProxyHandler.do_CONNECT = LocalProxyHandler.do_CONNECT_Thunnel
@@ -606,6 +611,8 @@ class LocalProxyServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
 
 logging.basicConfig(level=logging.ERROR, format='%(levelname)s - - %(asctime)s %(message)s', datefmt='[%d/%b/%Y %H:%M:%S]')
 common = Common()
+rand = random.randint(0, len(common.PHP_FETCHSERVERS)-1)
+phpLength = len(common.PHP_FETCHSERVERS)
 
 def main():
     if not OpenSSL:
