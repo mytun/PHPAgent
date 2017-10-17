@@ -276,7 +276,7 @@ class URLFetch {
 
         //error_exit('urlfetch result:', array('status_code' => $status_code, 'headers' => $this->headers, 'content-size' => $this->body_size, 'error' => $error));
 
-        $response = array('status_code' => $status_code, 'headers' => $this->headers, 'content' => $this->body, 'error' => $error);
+        $response = array('status_code' => $status_code, 'headers' => $this->headers, 'content' => $this->body, 'error' => 'error');
         return $response;
     }
 }
@@ -297,7 +297,7 @@ function post()
 
     $request = @gzuncompress(@file_get_contents('php://input'));
     if ($request === False) {
-        return print_notify($method, $url, 500, 'OOPS! gzuncompress php://input error!');
+        return print_notify('', '', 500, 'OOPS! gzuncompress php://input error!');
     }
     $request = decode_data($request);
 

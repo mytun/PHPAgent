@@ -470,6 +470,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self.headers['Connection'] = 'close'
             data = '%s %s %s\r\n'  % (self.command, urlparse.urlunparse(('', '', path, params, query, '')), self.request_version)
             data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if not k.startswith('proxy-'))
+            data += '\r\n'
             content_length = int(self.headers.get('content-length', 0))
             if content_length > 0:
                 data += self.rfile.read(content_length)
@@ -572,19 +573,12 @@ class PHPProxyHandler(LocalProxyHandler):
                 continue
         return (-1, errors)
 
-    def fetch(self, url, payload, method , headers = ''):
+    def fetch(self, url, payload, method='GET', headers=''):
         logging.info('urlfetch headers=%s',str(headers))
-        if len(headers) > 2:
-            try:
-                logging.info('urlfetch===== headers=%s',str(headers[-2:]))
-                if str(headers[-2:]) == "\r\n" :
-                    headers = str(headers[:-2])
-            except:
-                headers = str(headers)
-
-        if method == None :
-            method='GET'
-        if method == 'GET' :
+        headers = str(headers)
+        if method == None:
+            method = 'GET'
+        if method == 'GET':
             PHPProxyHandler.comm = (PHPProxyHandler.comm + 1) % phpLength;
             logging.info('urlfetch method=%s',method)
             return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOSTS[PHPProxyHandler.comm], common.PHP_FETCHSERVERS[PHPProxyHandler.comm])
