@@ -12,7 +12,7 @@ import threading
 import socket, ssl, select
 import urllib2, urlparse
 import BaseHTTPServer, SocketServer
-
+import base64
 try:
     import ctypes
 except ImportError:
@@ -37,7 +37,6 @@ class Common(object):
 
 
         self.PHP_ENABLE           = self.CONFIG.getint('php', 'enable')
-        self.PHP_IP               = self.CONFIG.get('php', 'ip')
         self.PHP_PASSWORD         = self.CONFIG.get('php', 'password').strip()
         self.PHP_PORT             = self.CONFIG.getint('php', 'port')
         self.PHP_FETCHSERVER      = self.CONFIG.get('php', 'fetchserver')
@@ -68,7 +67,7 @@ class Common(object):
         info = ''
         info += '------------------------------------------------------\n'
         info += 'PHPAgent Version : %s (python/%s pyopenssl/%s)\n' % (__version__, sys.version.partition(' ')[0], (OpenSSL.version.__version__ if OpenSSL else 'Disabled'))
-        info += 'PHP Mode Listen : %s:%d\n' % (self.PHP_IP, self.PHP_PORT) if self.PHP_ENABLE else ''
+        info += 'PHP Mode Listen : %d\n' % self.PHP_PORT if self.PHP_ENABLE else ''
         info += 'PHP FetchServer : %s\n' % common.PHP_FETCHSERVER_POST if self.PHP_ENABLE else ''
         info += 'PHP FetchServer GET  : %s\n' % common.PHP_FETCHSERVERS if self.PHP_ENABLE else ''
         info += '------------------------------------------------------\n'
@@ -410,10 +409,32 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         else:
             self.send_response(code, message)
             self.wfile.write(data)
-
-    def do_CONNECT(self):
-        return self.do_CONNECT_Thunnel()
-
+    def handle_one_request(self):
+        try:
+            self.raw_requestline = self.rfile.readline(65537)
+            if len(self.raw_requestline) > 65536:
+                self.requestline = ''
+                self.request_version = ''
+                self.command = ''
+                self.send_error(414)
+                return
+            if not self.raw_requestline:
+                self.close_connection = 1
+                return
+            if not self.parse_request():
+                # An error code has been sent, just exit
+                return
+            self.log_request("method==="+self.command)
+            if 'CONNECT'==self.command :
+                self.do_CONNECT_Thunnel();
+            else :
+                self.do_METHOD_Thunnel();
+            self.wfile.flush() #actually send the response if not already done.
+        except socket.timeout, e:
+            #a read or a write timed out.  Discard this connection
+            self.log_error("Request timed out: %r", e)
+            self.close_connection = 1
+            return
     def do_CONNECT_Thunnel(self):
         # for ssl proxy
         host, _, port = self.path.rpartition(':')
@@ -451,39 +472,6 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self.wfile = self._realwfile
             self.connection = self._realconnection
 
-    def do_METHOD(self):
-        return self.do_METHOD_Thunnel()
-
-    def do_METHOD_Direct(self):
-        scheme, netloc, path, params, query, fragment = urlparse.urlparse(self.path, 'http')
-        try:
-            host, _, port = netloc.rpartition(':')
-            port = int(port)
-        except ValueError:
-            host = netloc
-            port = 80
-        try:
-            self.log_request(200)
-            idlecall = None
-            sock = self.socket_create_connection((host, port))
-            self.headers['Connection'] = 'close'
-            data = '%s %s %s\r\n'  % (self.command, urlparse.urlunparse(('', '', path, params, query, '')), self.request_version)
-            data += ''.join('%s: %s\r\n' % (k, self.headers[k]) for k in self.headers if not k.startswith('proxy-'))
-            data += '\r\n'
-            content_length = int(self.headers.get('content-length', 0))
-            if content_length > 0:
-                data += self.rfile.read(content_length)
-            sock.sendall(data)
-            self.socket_forward(self.connection, sock, idlecall=idlecall)
-        except Exception, ex:
-            logging.exception('LocalProxyHandler.do_GET Error, %s', ex)
-        finally:
-            try:
-                sock.close()
-                del sock
-            except:
-                pass
-
     def do_METHOD_Thunnel(self):
         host = self.headers.dict.get('host') or urlparse.urlparse(self.path).netloc.partition(':')[0]
         if self.path[0] == '/':
@@ -516,8 +504,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     return
             content = '%s %d %s\r\n%s\r\n%s' % (self.protocol_version, code, self.responses.get(code, ('PHPAgent Notify', ''))[0], ''.join('%s: %s\r\n' % ('-'.join(x.title() for x in k.split('-')), v) for k, v in headers.iteritems()), data['content'])
             self.connection.sendall(content)
-            if 'close' == headers.get('connection',''):
-                self.close_connection = 1
+            self.close_connection = 1
         except socket.error, (err, _):
             # Connection closed before proxy return
             if err in (10053, errno.EPIPE):
@@ -537,7 +524,7 @@ class PHPProxyHandler(LocalProxyHandler):
             params['password'] = common.PHP_PASSWORD
         params['fetchmax'] = common.FETCHMAX_SERVER
         params = '&'.join('%s=%s' % (k, binascii.b2a_hex(v)) for k, v in params.iteritems())
-        logging.info('urlfetch=== params %s', params)
+        params = base64.encodestring(params);
         for i in xrange(common.FETCHMAX_LOCAL):
             try :
                 logging.debug('urlfetch %r by %r', url, fetchserver)
@@ -576,26 +563,9 @@ class PHPProxyHandler(LocalProxyHandler):
         headers = str(headers)
         if method == None:
             method = 'GET'
-        if method == 'GET':
-            PHPProxyHandler.comm = (PHPProxyHandler.comm + 1) % phpLength;
-            logging.info('urlfetch method=%s',method)
-            return self.urlfetch(url, payload, method, headers, common.PHP_FETCHSERVERS[PHPProxyHandler.comm])
-        else :
-            return self.urlfetch(url, payload, method, headers, common.PHP_FETCHSERVER_POST)
-
-    def setup(self):
-        PHPProxyHandler.do_CONNECT = LocalProxyHandler.do_CONNECT_Thunnel
-        PHPProxyHandler.do_GET     = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_POST    = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_PUT     = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_DELETE  = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_ET      = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_HEAD    = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_PATCH   = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_OPTIONS = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_TRACE   = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.setup      = BaseHTTPServer.BaseHTTPRequestHandler.setup
-        BaseHTTPServer.BaseHTTPRequestHandler.setup(self)
+        PHPProxyHandler.comm = (PHPProxyHandler.comm + 1) % phpLength;
+        logging.info('urlfetch method=%s',method)
+        return self.urlfetch(url, payload, method, headers, common.PHP_FETCHSERVERS[PHPProxyHandler.comm])
 
 class LocalProxyServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
     daemon_threads = True
@@ -613,7 +583,7 @@ def main():
     CertUtil.checkCA()
     common.install_opener()
     sys.stdout.write(common.info())
-    httpd = LocalProxyServer((common.PHP_IP, common.PHP_PORT), PHPProxyHandler)
+    httpd = LocalProxyServer(('', common.PHP_PORT), PHPProxyHandler)
     httpd.serve_forever()
 
 if __name__ == '__main__':
