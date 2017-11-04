@@ -44,7 +44,7 @@ class Common(object):
         self.PHP_FETCHSERVER_POST = self.CONFIG.get('php', 'fetchserverpost')
 
         self.FETCHMAX_LOCAL       = self.CONFIG.getint('fetchmax', 'local') if self.CONFIG.get('fetchmax', 'local') else 3
-        self.FETCHMAX_SERVER      = self.CONFIG.get('fetchmax', 'server')
+        self.FETCHMAX_SERVER      = self.CONFIG.get('fetchmax', 'server') if self.CONFIG.get('fetchmax', 'server') else 3
 
         self.AUTORANGE_HOSTS      = tuple(self.CONFIG.get('autorange', 'hosts').split('|'))
         self.AUTORANGE_HOSTS_TAIL = tuple(x.rpartition('*')[2] for x in self.AUTORANGE_HOSTS)
@@ -58,7 +58,6 @@ class Common(object):
         self.PHP_FETCHHOSTS       = []
 
         for i in self.PHP_FETCHSERVERS : self.PHP_FETCHHOSTS.append(re.sub(':\d+$', '', urlparse.urlparse(i).netloc))
-        self.PHP_FETCHHOSTS_POST  = re.sub(':\d+$', '', urlparse.urlparse(self.PHP_FETCHSERVER_POST).netloc)
     def install_opener(self):
         handlers = [urllib2.ProxyHandler({})]
         opener = urllib2.build_opener(*handlers)
@@ -528,20 +527,19 @@ class PHPProxyHandler(LocalProxyHandler):
 
     comm = 0
 
-    def urlfetch(self,url, payload, method , headers, fetchhost, fetchserver):
+    def urlfetch(self,url, payload, method , headers, fetchserver):
         errors = []
+        if common.USERAGENT_ENABLE:
+            headers['useragent'] = common.USERAGENT_STRING
         params = {'url': url, 'method': method, 'headers': headers, 'payload': payload}
         logging.info('urlfetch params %s', params)
         if common.PHP_PASSWORD:
             params['password'] = common.PHP_PASSWORD
-        if common.FETCHMAX_SERVER:
-            params['fetchmax'] = common.FETCHMAX_SERVER
-        if common.USERAGENT_ENABLE:
-            params['useragent'] = common.USERAGENT_STRING
+        params['fetchmax'] = common.FETCHMAX_SERVER
         params = '&'.join('%s=%s' % (k, binascii.b2a_hex(v)) for k, v in params.iteritems())
         logging.info('urlfetch=== params %s', params)
         for i in xrange(common.FETCHMAX_LOCAL):
-            try:
+            try :
                 logging.debug('urlfetch %r by %r', url, fetchserver)
                 request = urllib2.Request(fetchserver, zlib.compress(params, 9))
                 response = urllib2.urlopen(request)
@@ -581,9 +579,9 @@ class PHPProxyHandler(LocalProxyHandler):
         if method == 'GET':
             PHPProxyHandler.comm = (PHPProxyHandler.comm + 1) % phpLength;
             logging.info('urlfetch method=%s',method)
-            return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOSTS[PHPProxyHandler.comm], common.PHP_FETCHSERVERS[PHPProxyHandler.comm])
+            return self.urlfetch(url, payload, method, headers, common.PHP_FETCHSERVERS[PHPProxyHandler.comm])
         else :
-            return self.urlfetch(url, payload, method, headers, common.PHP_FETCHHOSTS_POST, common.PHP_FETCHSERVER_POST)
+            return self.urlfetch(url, payload, method, headers, common.PHP_FETCHSERVER_POST)
 
     def setup(self):
         PHPProxyHandler.do_CONNECT = LocalProxyHandler.do_CONNECT_Thunnel
@@ -603,7 +601,7 @@ class LocalProxyServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-logging.basicConfig(level=logging.ERROR, format='%(levelname)s - - %(asctime)s %(message)s', datefmt='[%d/%b/%Y %H:%M:%S]')
+logging.basicConfig(level=logging.INFO, format='%(levelname)s - - %(asctime)s %(message)s', datefmt='[%d/%b/%Y %H:%M:%S]')
 common = Common()
 rand = random.randint(0, len(common.PHP_FETCHSERVERS)-1)
 phpLength = len(common.PHP_FETCHSERVERS)
