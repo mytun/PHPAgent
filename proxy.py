@@ -12,7 +12,7 @@ import threading
 import socket, ssl, select
 import urllib2, urlparse
 import BaseHTTPServer, SocketServer
-import base64
+import base64,json
 try:
     import ctypes
 except ImportError:
@@ -40,7 +40,6 @@ class Common(object):
         self.PHP_PASSWORD         = self.CONFIG.get('php', 'password').strip()
         self.PHP_PORT             = self.CONFIG.getint('php', 'port')
         self.PHP_FETCHSERVER      = self.CONFIG.get('php', 'fetchserver')
-        self.PHP_FETCHSERVER_POST = self.CONFIG.get('php', 'fetchserverpost')
 
         self.FETCHMAX_LOCAL       = self.CONFIG.getint('fetchmax', 'local') if self.CONFIG.get('fetchmax', 'local') else 3
         self.FETCHMAX_SERVER      = self.CONFIG.get('fetchmax', 'server') if self.CONFIG.get('fetchmax', 'server') else 3
@@ -68,8 +67,7 @@ class Common(object):
         info += '------------------------------------------------------\n'
         info += 'PHPAgent Version : %s (python/%s pyopenssl/%s)\n' % (__version__, sys.version.partition(' ')[0], (OpenSSL.version.__version__ if OpenSSL else 'Disabled'))
         info += 'PHP Mode Listen : %d\n' % self.PHP_PORT if self.PHP_ENABLE else ''
-        info += 'PHP FetchServer : %s\n' % common.PHP_FETCHSERVER_POST if self.PHP_ENABLE else ''
-        info += 'PHP FetchServer GET  : %s\n' % common.PHP_FETCHSERVERS if self.PHP_ENABLE else ''
+        info += 'PHP FetchServer  : %s\n' % common.PHP_FETCHSERVERS if self.PHP_ENABLE else ''
         info += '------------------------------------------------------\n'
         return info
 
@@ -279,62 +277,6 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     SetupLock = threading.Lock()
     MessageClass = SimpleMessageClass
 
-    def socket_create_connection(self,(host, port), timeout=None, source_address=None):
-        logging.debug('socket_create_connection connect (%r, %r)', host, port)
-        msg = 'getaddrinfo returns an empty list'
-        for res in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
-            af, socktype, proto, canonname, sa = res
-            sock = None
-            try:
-                sock = socket.socket(af, socktype, proto)
-                if isinstance(timeout, (int, float)):
-                    sock.settimeout(timeout)
-                if source_address is not None:
-                    sock.bind(source_address)
-                sock.connect(sa)
-                return sock
-            except socket.error, msg:
-                if sock is not None:
-                    sock.close()
-        raise socket.error, msg
-
-    def socket_forward(local, remote, timeout=60, tick=2, bufsize=8192, maxping=None, maxpong=None, idlecall=None):
-        timecount = timeout
-        try:
-            while 1:
-                timecount -= tick
-                if timecount <= 0:
-                    break
-                (ins, _, errors) = select.select([local, remote], [], [local, remote], tick)
-                if errors:
-                    break
-                if ins:
-                    for sock in ins:
-                        data = sock.recv(bufsize)
-                        if data:
-                            if sock is local:
-                                remote.sendall(data)
-                                timecount = maxping or timeout
-                            else:
-                                local.sendall(data)
-                                timecount = maxpong or timeout
-                        else:
-                            return
-                else:
-                    if idlecall:
-                        try:
-                            idlecall()
-                        except Exception, e:
-                            logging.exception('socket_forward idlecall fail:%s', e)
-                        finally:
-                            idlecall = None
-        except Exception, ex:
-            logging.exception('socket_forward error=%s', ex)
-            raise
-        finally:
-            if idlecall:
-                idlecall()
-
     def rangefetch(self, m, data):
         m = map(int, m.groups())
         start = m[0]
@@ -483,14 +425,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             payload = ''
 
         headers = ''.join('%s: %s\r\n' % (k, v) for k, v in self.headers.iteritems() if k not in self.skip_headers)
-
-        if host.endswith(common.AUTORANGE_HOSTS_TAIL):
-            for pattern in common.AUTORANGE_HOSTS:
-                if host.endswith(pattern) or fnmatch.fnmatch(host, pattern):
-                    logging.debug('autorange pattern=%r match url=%r', pattern, self.path)
-                    headers += 'range: bytes=0-%d\r\n' % common.AUTORANGE_MAXSIZE
-                    break
-
+        headers += 'range: bytes=0-%d\r\n' % common.AUTORANGE_MAXSIZE
         retval, data = self.fetch(self.path, payload, self.command, headers)
         try:
             if retval == -1:
@@ -502,9 +437,10 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 m = re.search(r'bytes\s+(\d+)-(\d+)/(\d+)', headers.get('content-range',''))
                 if m and self.rangefetch(m, data):
                     return
-            content = '%s %d %s\r\n%s\r\n%s' % (self.protocol_version, code, self.responses.get(code, ('PHPAgent Notify', ''))[0], ''.join('%s: %s\r\n' % ('-'.join(x.title() for x in k.split('-')), v) for k, v in headers.iteritems()), data['content'])
-            self.connection.sendall(content)
-            self.close_connection = 1
+            respline = '%s %d \r\n' % (self.protocol_version, data['code'])
+            strheaders = ''.join('%s: %s\r\n' % ('-'.join(x.title() for x in k.split('-')), v) for k, v in data['headers'].iteritems())
+            self.wfile.write(respline+strheaders+'\r\n')
+            self.wfile.write(data['content'])
         except socket.error, (err, _):
             # Connection closed before proxy return
             if err in (10053, errno.EPIPE):
@@ -530,26 +466,10 @@ class PHPProxyHandler(LocalProxyHandler):
                 logging.debug('urlfetch %r by %r', url, fetchserver)
                 request = urllib2.Request(fetchserver, zlib.compress(params, 9))
                 response = urllib2.urlopen(request)
-                data = response.read()
+                data = json.loads(base64.decodestring(response.read()))
                 response.close()
-                logging.info('urlfetch=== data %s', data[0])
-                if data[0] == '0':
-                    raw_data = data[1:]
-                elif data[0] == '1':
-                    raw_data = zlib.decompress(data[1:])
-                else:
-                    raise ValueError('Data format not match(%s)' % url)
-                data = {}
-                data['code'], hlen, clen = struct.unpack('>3I', raw_data[:12])
-                tlen = 12 + hlen + clen
-                realtlen = len(raw_data)
-                if realtlen == tlen:
-                    data['content'] = raw_data[12 + hlen:]
-                elif realtlen > tlen:
-                    data['content'] = raw_data[12 + hlen:tlen]
-                else:
-                    raise ValueError('Data length is short than excepted!')
-                data['headers'] = dict((k, binascii.a2b_hex(v)) for k, _, v in (x.partition('=') for x in raw_data[12:12 + hlen].split('&')))
+                data['content']=binascii.a2b_hex(data['content'])
+                data['headers'] = dict((k, binascii.a2b_hex(v)) for k, _, v in (x.partition('=') for x in data['headers'].split('&')))
                 return (0, data)
             except Exception, e:
                 logging.error('urlfetch error=%s', str(e))

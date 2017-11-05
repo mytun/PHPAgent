@@ -22,16 +22,12 @@ function decode_data($qs) {
 }
 
 function print_response($status, $headers, $content) {
-    $strheaders = encode_data($headers);
-    $content_type = $headers['content-type'];
-    if ($content_type && substr($content_type, 0, 4) == 'text') {
-        $data = '1' . gzcompress(pack('NNN', $status, strlen($strheaders), strlen($content)) . $strheaders . $content);
-    } else {
-        $data = '0' . pack('NNN', $status, strlen($strheaders), strlen($content)) . $strheaders . $content;
-    }
-    header('Content-Type: image/gif');
+    $data['headers'] = encode_data($headers);
+    $data['content'] = bin2hex($content);
+    $data['code'] = $status;
+    header('Content-Type: text/html');
     header('Content-Length: '.strlen($data));
-    print($data);
+    print(base64_encode(json_encode($data)));
 }
 
 function print_notify($method, $url, $status, $content) {
@@ -95,14 +91,11 @@ class URLFetch {
         $this->body_size = 0;
 
         if ($payload) {
-            $headers['content-length'] = strval(strlen($payload));
             $curl_opt[CURLOPT_POSTFIELDS] = $payload;
         }
         $headers['connection'] = 'close';
-
         $curl_opt = array();
-
-        $curl_opt[CURLOPT_TIMEOUT]        = 60;
+        $curl_opt[CURLOPT_TIMEOUT]        = 16;
         $curl_opt[CURLOPT_CONNECTTIMEOUT] = 240;
         $curl_opt[CURLOPT_RETURNTRANSFER] = true;
         $curl_opt[CURLOPT_BINARYTRANSFER] = true;
@@ -146,7 +139,6 @@ class URLFetch {
             $error =  $errno . ': ' .curl_error($ch);
         }
         curl_close($ch);
-
         $content_length = 1 * $this->headers["content-length"];
 
         if ($status_code == 200 && $this->body_size > $this->body_maxsize && $content_length && $this->body_size < $content_length) {
@@ -180,7 +172,7 @@ function post()
     $method  = $request['method'];
     $url     = $request['url'];
     $payload = $request['payload'];
-
+    $fetchmax = $request['fetchmax'];
 
     if ($__password__ && $__password__ != $request['password']) {
         return print_notify($method, $url, 403, 'Wrong password.');
@@ -190,7 +182,6 @@ function post()
         return print_notify($method, $url, 501, 'Unsupported Scheme');
     }
 
-    $FetchMax     = 3;
     $headers = array();
     foreach (explode("\r\n", $request['headers']) as $line) {
         $pair = explode(':', $line, 2);
@@ -199,7 +190,7 @@ function post()
     $headers['connection'] = 'close';
 
     $errors = array();
-    for ($i = 0; $i < $FetchMax; $i++) {
+    for ($i = 0; $i < $fetchmax; $i++) {
         $response = urlfetch($url, $payload, $method, $headers);
         $status_code = $response['status_code'];
         if (200 <= $status_code && $status_code < 400) {
