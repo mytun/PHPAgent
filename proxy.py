@@ -34,9 +34,8 @@ class Common(object):
         self.CONFIG.read(os.path.splitext(__file__)[0] + '.ini')
 
         self.LISTEN_VISIBLE       = self.CONFIG.getint('listen', 'visible')
+        self.AUTORANGE_MAXSIZE    = self.CONFIG.getint('listen', 'maxsize')
 
-
-        self.PHP_ENABLE           = self.CONFIG.getint('php', 'enable')
         self.PHP_PASSWORD         = self.CONFIG.get('php', 'password').strip()
         self.PHP_PORT             = self.CONFIG.getint('php', 'port')
         self.PHP_FETCHSERVER      = self.CONFIG.get('php', 'fetchserver')
@@ -44,10 +43,6 @@ class Common(object):
         self.FETCHMAX_LOCAL       = self.CONFIG.getint('fetchmax', 'local') if self.CONFIG.get('fetchmax', 'local') else 3
         self.FETCHMAX_SERVER      = self.CONFIG.get('fetchmax', 'server') if self.CONFIG.get('fetchmax', 'server') else 3
 
-        self.AUTORANGE_HOSTS      = tuple(self.CONFIG.get('autorange', 'hosts').split('|'))
-        self.AUTORANGE_HOSTS_TAIL = tuple(x.rpartition('*')[2] for x in self.AUTORANGE_HOSTS)
-        self.AUTORANGE_ENDSWITH   = tuple(self.CONFIG.get('autorange', 'endswith').split('|'))
-        self.AUTORANGE_MAXSIZE    = self.CONFIG.getint('autorange', 'maxsize')
 
         self.USERAGENT_ENABLE     = self.CONFIG.getint('useragent', 'enable')
         self.USERAGENT_STRING     = self.CONFIG.get('useragent', 'string')
@@ -66,8 +61,8 @@ class Common(object):
         info = ''
         info += '------------------------------------------------------\n'
         info += 'PHPAgent Version : %s (python/%s pyopenssl/%s)\n' % (__version__, sys.version.partition(' ')[0], (OpenSSL.version.__version__ if OpenSSL else 'Disabled'))
-        info += 'PHP Mode Listen : %d\n' % self.PHP_PORT if self.PHP_ENABLE else ''
-        info += 'PHP FetchServer  : %s\n' % common.PHP_FETCHSERVERS if self.PHP_ENABLE else ''
+        info += 'PHP Mode Listen : %d\n' % self.PHP_PORT
+        info += 'PHP FetchServer  : %s\n' % common.PHP_FETCHSERVERS
         info += '------------------------------------------------------\n'
         return info
 
