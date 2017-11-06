@@ -332,9 +332,6 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         logging.info('>>>>>>>>>>>>>>> Range Fetch ended(%r)', self.headers.get('Host'))
         return True
 
-    def address_string(self):
-        return '%s:%s' % (self.client_address[0], self.client_address[1])
-
     def send_response(self, code, message=None):
         self.log_request(code)
         message = message or self.responses.get(code, ('PHPAgent Notify',))[0]
@@ -359,16 +356,14 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 self.close_connection = 1
                 return
             if not self.parse_request():
-                # An error code has been sent, just exit
                 return
-            self.log_request("method==="+self.command)
+            logging.info("method===%s", self.command)
             if 'CONNECT'==self.command :
                 self.do_CONNECT_Thunnel();
             else :
                 self.do_METHOD_Thunnel();
-            self.wfile.flush() #actually send the response if not already done.
+            self.wfile.flush()
         except socket.timeout, e:
-            #a read or a write timed out.  Discard this connection
             self.log_error("Request timed out: %r", e)
             self.close_connection = 1
             return
@@ -432,10 +427,12 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 m = re.search(r'bytes\s+(\d+)-(\d+)/(\d+)', headers.get('content-range',''))
                 if m and self.rangefetch(m, data):
                     return
-            respline = '%s %d \r\n' % (self.protocol_version, data['code'])
+            respline = '%s %d %s\r\n' % (self.protocol_version, data['code'],self.responses.get(code, ('PHPAgent Notify', ''))[0])
             strheaders = ''.join('%s: %s\r\n' % ('-'.join(x.title() for x in k.split('-')), v) for k, v in data['headers'].iteritems())
-            self.wfile.write(respline+strheaders+'\r\n')
-            self.wfile.write(data['content'])
+            self.connection.sendall(respline+strheaders+'\r\n')
+            self.connection.sendall(data['content'])
+            if 'close' == headers.get('connection',''):
+                self.close_connection = 1
         except socket.error, (err, _):
             # Connection closed before proxy return
             if err in (10053, errno.EPIPE):
