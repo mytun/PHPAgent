@@ -6,13 +6,15 @@ __version__ = '1.2'
 __author__ = "lxyg06@163.com"
 
 import sys, os, re, time, errno, binascii, zlib
-import struct, random, hashlib
-import fnmatch, logging, ConfigParser
-import threading
-import socket, ssl, select
+import random, hashlib
+import logging, ConfigParser
+import threading,thread
+import socket, ssl
 import urllib2, urlparse
 import BaseHTTPServer, SocketServer
 import base64,json
+from gzip import GzipFile
+import StringIO
 try:
     import ctypes
 except ImportError:
@@ -269,73 +271,82 @@ class SimpleMessageClass(object):
 
 class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     skip_headers = frozenset(['host', 'vary', 'via', 'x-forwarded-for', 'proxy-authorization', 'proxy-connection', 'upgrade', 'keep-alive'])
+    skip_r_headers = frozenset(['content-range'])
     SetupLock = threading.Lock()
     MessageClass = SimpleMessageClass
+    content = 0
 
-    def rangefetch(self, m, data):
-        m = map(int, m.groups())
-        start = m[0]
-        end = m[2] - 1
-        if 'range' in self.headers:
-            req_range = re.search(r'(\d+)?-(\d+)?', self.headers['range'])
-            if req_range:
-                req_range = [u and int(u) for u in req_range.groups()]
-                if req_range[0] is None:
-                    if req_range[1] is not None:
-                        if m[1]-m[0]+1==req_range[1] and m[1]+1==m[2]:
-                            return False
-                        if m[2] >= req_range[1]:
-                            start = m[2] - req_range[1]
-                else:
-                    start = req_range[0]
-                    if req_range[1] is not None:
-                        if m[0]==req_range[0] and m[1]==req_range[1]:
-                            return False
-                        if end > req_range[1]:
-                            end = req_range[1]
-            data['headers']['content-range'] = 'bytes %d-%d/%d' % (start, end, m[2])
-        elif start == 0:
-            data['code'] = 200
-            del data['headers']['content-range']
-        data['headers']['content-length'] = end-start+1
-        partSize = common.AUTORANGE_MAXSIZE
-
-        respline = '%s %d %s\r\n' % (self.protocol_version, data['code'], '')
-        strheaders = ''.join('%s: %s\r\n' % ('-'.join(x.title() for x in k.split('-')), v) for k, v in data['headers'].iteritems())
-        self.wfile.write(respline+strheaders+'\r\n')
-
-        if start == m[0]:
-            self.wfile.write(data['content'])
-            start = m[1] + 1
-            partSize = len(data['content'])
+    def fetch(self,url, payload, method='GET', headers=''):
+        errors = []
+        if method == None:
+            method = 'GET'
+        if common.USERAGENT_ENABLE:
+            headers['useragent'] = common.USERAGENT_STRING
+        headers = '&'.join('%s=%s' % (binascii.b2a_hex(k), binascii.b2a_hex(v)) for k, v in headers.iteritems() if k not in self.skip_headers)
+        params = {'url': url, 'method': method, 'headers': headers, 'payload': payload}
+        logging.info('urlfetch params %s', params)
+        if common.PHP_PASSWORD:
+            params['password'] = common.PHP_PASSWORD
+        params['fetchmax'] = common.FETCHMAX_SERVER
+        params = '&'.join('%s=%s' % (binascii.b2a_hex(k), binascii.b2a_hex(v)) for k, v in params.iteritems())
+        for i in xrange(common.FETCHMAX_LOCAL):
+            try:
+                data = self.urlfetch(params)
+                if data['code'] == 206 and self.command == 'GET':
+                    data['headers']['php-range'] = data['headers']['content-range']
+                    del data['headers']['content-range']
+                return (0, data)
+            except Exception, e:
+                logging.error('urlfetch error=%s', str(e))
+                errors.append(str(e))
+                time.sleep(i + 1)
+                continue
+        return (-1, errors)
+    def rengefetchThread(self,start,end,headers,lock,nextlock,number):
         failed = 0
-        logging.info('>>>>>>>>>>>>>>> Range Fetch started(%r)', self.headers.get('Host'))
-        while start <= end:
-            if failed > 5:
-                break
-            self.headers['Range'] = 'bytes=%d-%d' % (start, start + partSize - 1)
-            retval, data = self.fetch(self.path, '', self.command, self.headers)
+        logging.info('>>>>>>>>>>>>>>> number==%d' % number)
+        while failed < common.FETCHMAX_LOCAL:
+            headers['range'] = 'bytes=%d-%d' % (start, end)
+            retval, data = self.fetch(self.path, '', self.command, headers)
             if retval != 0 or data['code'] >= 400:
                 failed += 1
                 seconds = random.randint(2*failed, 2*(failed+1))
                 logging.error('rangefetch fail %d times: retval=%d http_code=%d, retry after %d secs!', failed, retval, data['code'] if not retval else 'Unkown', seconds)
                 time.sleep(seconds)
                 continue
-            m = re.search(r'bytes\s+(\d+)-(\d+)/(\d+)', data['headers'].get('content-range',''))
-            if not m or int(m.group(1))!=start:
-                failed += 1
-                continue
-            start = int(m.group(2)) + 1
-            logging.info('>>>>>>>>>>>>>>> %s %d' % (data['headers']['content-range'], end))
-            failed = 0
+            logging.info('>>>>>>>>>>>>>>> content-range=%s' % data['headers']['php-range'])
+            lock.acquire()
+            logging.info('>>>>>>>>>>>>>>> write number==%d' % number)
             self.wfile.write(data['content'])
+            logging.info('>>>>>>>>>>>>>>> write number==%s' % data['content'])
+            lock.release()
+            break
+        nextlock.release()
+
+    def rangefetch(self, start,end):
+
+        logging.info('>>>>>>>>>>>>>>> Range Fetch started(%r)', self.headers.get('Host'))
+        lock = threading.Lock()
+        failed = 0;
+        while start < end:
+            failed += 1
+            start_ = start + common.AUTORANGE_MAXSIZE - 1
+            if start_ > end:
+                start_ = end
+            nextlock = threading.Lock()
+            nextlock.acquire()
+            thread.start_new_thread(self.rengefetchThread , (start,start_,self.headers,lock,nextlock,failed))
+            lock = nextlock
+            start = start_
+        lock.acquire()
+        lock.release()
         logging.info('>>>>>>>>>>>>>>> Range Fetch ended(%r)', self.headers.get('Host'))
         return True
 
     def send_response(self, code, message=None):
         self.log_request(code)
         message = message or self.responses.get(code, ('PHPAgent Notify',))[0]
-        self.wfile.write('%s %d %s\r\n' % (self.protocol_version, code, message))
+        self.wfile.write('%s %d %s\r\n' % (self.request_version, code, message))
 
     def end_error(self, code, message=None, data=None):
         if not data:
@@ -362,17 +373,17 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 self.do_CONNECT_Thunnel();
             else :
                 self.do_METHOD_Thunnel();
-            self.wfile.flush()
+            if not self.wfile.closed:
+                self.wfile.flush()
         except socket.timeout, e:
             self.log_error("Request timed out: %r", e)
             self.close_connection = 1
             return
     def do_CONNECT_Thunnel(self):
-        # for ssl proxy
         host, _, port = self.path.rpartition(':')
         keyFile, crtFile = CertUtil.getCertificate(host)
         self.log_request(200)
-        self.connection.sendall('%s 200 OK\r\n\r\n' % self.request_version)
+        self.connection.sendall('%s 200 OK\r\n' % self.request_version)
         try:
             self._realpath = self.path
             self._realrfile = self.rfile
@@ -380,7 +391,6 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self._realconnection = self.connection
             self.connection = ssl.wrap_socket(self.connection, keyFile, crtFile, True)
             self.rfile = self.connection.makefile('rb', self.rbufsize)
-            self.wfile = self.connection.makefile('wb', self.wbufsize)
             self.raw_requestline = self.rfile.readline()
             if self.raw_requestline == '':
                 return
@@ -389,6 +399,8 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 self.path = 'https://%s%s' % (self._realpath, self.path)
                 self.requestline = '%s %s %s' % (self.command, self.path, self.request_version)
             self.do_METHOD_Thunnel()
+            if not self.wfile.closed:
+                self.wfile.flush()
         except socket.error, e:
             logging.exception('do_CONNECT_Thunnel socket.error: %s', e)
         finally:
@@ -413,24 +425,36 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             payload = self.rfile.read(payload_len)
         else:
             payload = ''
-
-        headers = ''.join('%s: %s\r\n' % (k, v) for k, v in self.headers.iteritems() if k not in self.skip_headers)
-        headers += 'range: bytes=0-%d\r\n' % common.AUTORANGE_MAXSIZE
-        retval, data = self.fetch(self.path, payload, self.command, headers)
+        if 'range' not in self.headers:
+            self.headers['Range']='bytes=0-9'
+            self.headers['Accept-Ranges']='bytes'
+        retval, data = self.fetch(self.path, payload, self.command, self.headers)
         try:
             if retval == -1:
                 return self.end_error(502, str(data))
             code = data['code']
             headers = data['headers']
             self.log_request(code)
-            if code == 206 and self.command=='GET':
-                m = re.search(r'bytes\s+(\d+)-(\d+)/(\d+)', headers.get('content-range',''))
-                if m and self.rangefetch(m, data):
-                    return
-            respline = '%s %d %s\r\n' % (self.protocol_version, data['code'],self.responses.get(code, ('PHPAgent Notify', ''))[0])
-            strheaders = ''.join('%s: %s\r\n' % ('-'.join(x.title() for x in k.split('-')), v) for k, v in data['headers'].iteritems())
-            self.connection.sendall(respline+strheaders+'\r\n')
-            self.connection.sendall(data['content'])
+            strheaders = '%s %d %s\r\n%s' % (self.request_version, data['code'],self.responses.get(code, ('PHPAgent Notify', ''))[0],'\r\n'.join('%s: %s' % (k, v) for k, v in data['headers'].iteritems()))
+            self.connection.sendall(strheaders+'\r\n\r\n')
+          #  logging.info('>>>>>>>>>>>>>>> strheaders=%s' % strheaders)
+            if code == 206 and self.command == 'GET':
+                logging.info('>>>>>>>>>>>>>>> content-range=%s' % data['headers']['php-range'])
+                m = re.search(r'bytes\s+(\d+)-(\d+)/(\d+)', data['headers'].get('php-range',''))
+                m = map(int, m.groups())
+                data['start'] = m[1]
+                data['end'] = m[2]-1
+                data['headers']['content-length'] = m[2]
+                logging.info('>>>>>>>>>>>>>>> content-length=%d', m[2])
+                self.wfile = self.connection.makefile('wb', m[2])
+            else:
+                logging.info('>>>>>>>>>>>>>>> content-length=%d', len(data['content']))
+                self.wfile = self.connection.makefile('wb',len(data['content']))
+            self.wfile.write(data['content'])
+            if code == 206 and self.command == 'GET':
+                self.rangefetch(data['start'],data['end'])
+           # logging.info(data['content'])
+            logging.info('>>>>>>>>>>>>>>> html end')
             if 'close' == headers.get('connection',''):
                 self.close_connection = 1
         except socket.error, (err, _):
@@ -441,43 +465,21 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 class PHPProxyHandler(LocalProxyHandler):
 
     comm = 0
+    def gzip(self,data):
+        buf = StringIO(data)
+        f = GzipFile(fileobj=buf)
+        return f.read()
+    def urlfetch(self,params):
+        PHPProxyHandler.comm = (PHPProxyHandler.comm + 1) % phpLength
+        fetchserver = common.PHP_FETCHSERVERS[PHPProxyHandler.comm]
+        request = urllib2.Request(fetchserver, zlib.compress(params, 9))
+        response = urllib2.urlopen(request)
+        data = json.loads(base64.decodestring(response.read()))
+        response.close()
+        data['headers'] = dict((k, binascii.a2b_hex(v)) for k, _, v in (x.partition('=') for x in data['headers'].split('&')))
+        data['content'] = binascii.a2b_hex(data['content'])
 
-    def urlfetch(self,url, payload, method , headers, fetchserver):
-        errors = []
-        if common.USERAGENT_ENABLE:
-            headers['useragent'] = common.USERAGENT_STRING
-        params = {'url': url, 'method': method, 'headers': headers, 'payload': payload}
-        logging.info('urlfetch params %s', params)
-        if common.PHP_PASSWORD:
-            params['password'] = common.PHP_PASSWORD
-        params['fetchmax'] = common.FETCHMAX_SERVER
-        params = '&'.join('%s=%s' % (k, binascii.b2a_hex(v)) for k, v in params.iteritems())
-        params = base64.encodestring(params);
-        for i in xrange(common.FETCHMAX_LOCAL):
-            try :
-                logging.debug('urlfetch %r by %r', url, fetchserver)
-                request = urllib2.Request(fetchserver, zlib.compress(params, 9))
-                response = urllib2.urlopen(request)
-                data = json.loads(base64.decodestring(response.read()))
-                response.close()
-                data['content']=binascii.a2b_hex(data['content'])
-                data['headers'] = dict((k, binascii.a2b_hex(v)) for k, _, v in (x.partition('=') for x in data['headers'].split('&')))
-                return (0, data)
-            except Exception, e:
-                logging.error('urlfetch error=%s', str(e))
-                errors.append(str(e))
-                time.sleep(i + 1)
-                continue
-        return (-1, errors)
-
-    def fetch(self, url, payload, method='GET', headers=''):
-        logging.info('urlfetch headers=%s',str(headers))
-        headers = str(headers)
-        if method == None:
-            method = 'GET'
-        PHPProxyHandler.comm = (PHPProxyHandler.comm + 1) % phpLength;
-        logging.info('urlfetch method=%s',method)
-        return self.urlfetch(url, payload, method, headers, common.PHP_FETCHSERVERS[PHPProxyHandler.comm])
+        return data
 
 class LocalProxyServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
     daemon_threads = True
@@ -485,9 +487,7 @@ class LocalProxyServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - - %(asctime)s %(message)s', datefmt='[%d/%b/%Y %H:%M:%S]')
 common = Common()
-rand = random.randint(0, len(common.PHP_FETCHSERVERS)-1)
 phpLength = len(common.PHP_FETCHSERVERS)
-
 def main():
     if not OpenSSL:
         logging.critical('OpenSSL is disabled, ABORT!')

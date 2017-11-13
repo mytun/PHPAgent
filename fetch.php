@@ -14,9 +14,9 @@ function encode_data($dic) {
 
 function decode_data($qs) {
     $dic = array();
-    foreach (explode('&', base64_decode($qs)) as $kv) {
+    foreach (explode('&', $qs) as $kv) {
         $pair = explode('=', $kv, 2);
-        $dic[$pair[0]] = $pair[1] ? pack('H*', $pair[1]) : '';
+        $dic[pack('H*', $pair[0])] = $pair[1] ? pack('H*', $pair[1]) : '';
     }
     return $dic;
 }
@@ -25,9 +25,9 @@ function print_response($status, $headers, $content) {
     $data['headers'] = encode_data($headers);
     $data['content'] = bin2hex($content);
     $data['code'] = $status;
-    header('Content-Type: text/html');
-    header('Content-Length: '.strlen($data));
-    print(base64_encode(json_encode($data)));
+    $data = base64_encode(json_encode($data));
+    header('Content-Type: text/html; charset=utf-8');
+    print($data);
 }
 
 function print_notify($method, $url, $status, $content) {
@@ -78,9 +78,6 @@ class URLFetch {
         $bytes = strlen($data);
         $this->body_size += $bytes;
         $this->body .= $data;
-        if ($this->body_size > $this->body_maxsize) {
-            return -1;
-        }
         return $bytes;
     }
 
@@ -139,15 +136,6 @@ class URLFetch {
             $error =  $errno . ': ' .curl_error($ch);
         }
         curl_close($ch);
-        $content_length = 1 * $this->headers["content-length"];
-
-        if ($status_code == 200 && $this->body_size > $this->body_maxsize && $content_length && $this->body_size < $content_length) {
-            $status_code = 206;
-            $range_start = 0;
-            $range_end = $this->body_size - 1;
-            $this->headers["content-range"] = "bytes $range_start-$range_end/$content_length";
-            $this->headers["content-length"] = $this->body_size;
-        }
         $response = array('status_code' => $status_code, 'headers' => $this->headers, 'content' => $this->body, 'error' => $error);
         return $response;
     }
@@ -168,7 +156,7 @@ function post()
         return print_notify('', '', 500, 'OOPS! gzuncompress php://input error!');
     }
     $request = decode_data($request);
-
+    return print_notify('', '', 403, '哈哈哈哈');
     $method  = $request['method'];
     $url     = $request['url'];
     $payload = $request['payload'];
@@ -182,11 +170,7 @@ function post()
         return print_notify($method, $url, 501, 'Unsupported Scheme');
     }
 
-    $headers = array();
-    foreach (explode("\r\n", $request['headers']) as $line) {
-        $pair = explode(':', $line, 2);
-        $headers[trim($pair[0])] = trim($pair[1]);
-    }
+    $headers = decode_data($request['headers']);
     $headers['connection'] = 'close';
 
     $errors = array();
