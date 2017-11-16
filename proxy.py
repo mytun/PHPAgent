@@ -369,7 +369,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             if not self.parse_request():
                 return
             logging.info("method===%s", self.command)
-            if 'CONNECT'==self.command :
+            if 'CONNECT' == self.command :
                 self.do_CONNECT_Thunnel();
             else :
                 self.do_METHOD_Thunnel();
@@ -388,6 +388,8 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self._realpath = self.path
             self._realrfile = self.rfile
             self._realwfile = self.wfile
+            del self.wfile
+            del self.rfile
             self._realconnection = self.connection
             self.connection = ssl.wrap_socket(self.connection, keyFile, crtFile, True)
             self.rfile = self.connection.makefile('rb', self.rbufsize)
@@ -401,6 +403,8 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self.do_METHOD_Thunnel()
             if not self.wfile.closed:
                 self.wfile.flush()
+            del self.wfile
+            del self.rfile
         except socket.error, e:
             logging.exception('do_CONNECT_Thunnel socket.error: %s', e)
         finally:
@@ -426,18 +430,16 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         else:
             payload = ''
         if 'range' not in self.headers:
-            self.headers['Range']='bytes=0-9'
-            self.headers['Accept-Ranges']='bytes'
+            self.headers['Range'] = 'bytes=0-9'
+            self.headers['Accept-Ranges'] = 'bytes'
         retval, data = self.fetch(self.path, payload, self.command, self.headers)
         try:
             if retval == -1:
                 return self.end_error(502, str(data))
             code = data['code']
-            headers = data['headers']
             self.log_request(code)
             strheaders = '%s %d %s\r\n%s' % (self.request_version, data['code'],self.responses.get(code, ('PHPAgent Notify', ''))[0],'\r\n'.join('%s: %s' % (k, v) for k, v in data['headers'].iteritems()))
             self.connection.sendall(strheaders+'\r\n\r\n')
-          #  logging.info('>>>>>>>>>>>>>>> strheaders=%s' % strheaders)
             if code == 206 and self.command == 'GET':
                 logging.info('>>>>>>>>>>>>>>> content-range=%s' % data['headers']['php-range'])
                 m = re.search(r'bytes\s+(\d+)-(\d+)/(\d+)', data['headers'].get('php-range',''))
@@ -449,16 +451,12 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 self.wfile = self.connection.makefile('wb', m[2])
             else:
                 logging.info('>>>>>>>>>>>>>>> content-length=%d', len(data['content']))
-                self.wfile = self.connection.makefile('wb',len(data['content']))
+                self.wfile = self.connection.makefile('wb', len(data['content']))
             self.wfile.write(data['content'])
             if code == 206 and self.command == 'GET':
                 self.rangefetch(data['start'],data['end'])
-           # logging.info(data['content'])
             logging.info('>>>>>>>>>>>>>>> html end')
-            if 'close' == headers.get('connection',''):
-                self.close_connection = 1
         except socket.error, (err, _):
-            # Connection closed before proxy return
             if err in (10053, errno.EPIPE):
                 return
 
