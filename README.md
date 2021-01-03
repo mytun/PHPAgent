@@ -16,13 +16,13 @@
 
 ### windows系统
 
->如果是windows8以上的操作系统必须右键以管路员身份运行phpagent.exe。
+>在cmd命令行中输入python proxy.py
 
 ### mac系统
 
  >1、由于mac系统还没写导入证书功能，所以要先导入证书，再信任证书
  
- >2、运行goagent-osx.command或者手动输入python proxy.py
+ >2、命令行中输入python proxy.py
  
  ## 谷歌浏览器代理配置
  
